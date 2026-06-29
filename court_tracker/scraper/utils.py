@@ -1,0 +1,47 @@
+"""Scraper utility helpers."""
+import random
+import time
+import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+VIEWPORT = {"width": 1280, "height": 900}
+TIMEOUT = 30_000  # ms
+
+
+def random_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:
+    time.sleep(random.uniform(min_s, max_s))
+
+
+def normalize_case_number(raw: str) -> str:
+    """Strip whitespace and normalise Cyrillic А to Latin A in case numbers."""
+    s = raw.strip()
+    # КАД uses Cyrillic А (U+0410) in case numbers like А40-12345/2024
+    s = s.replace("А", "A")
+    return s
+
+
+def parse_date_ru(text: str) -> str | None:
+    """Convert Russian date strings like '15 января 2024 г.' to ISO YYYY-MM-DD."""
+    months = {
+        "января": "01", "февраля": "02", "марта": "03",
+        "апреля": "04", "мая": "05", "июня": "06",
+        "июля": "07", "августа": "08", "сентября": "09",
+        "октября": "10", "ноября": "11", "декабря": "12",
+    }
+    m = re.search(r"(\d{1,2})\s+(\w+)\s+(\d{4})", text or "")
+    if m:
+        day, mon, year = m.group(1).zfill(2), m.group(2).lower(), m.group(3)
+        return f"{year}-{months.get(mon, '00')}-{day}"
+    # Try numeric format DD.MM.YYYY
+    m2 = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", text or "")
+    if m2:
+        return f"{m2.group(3)}-{m2.group(2)}-{m2.group(1)}"
+    return None
