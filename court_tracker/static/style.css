@@ -479,3 +479,274 @@ select.form-control { cursor: pointer; }
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* =========================================================
+   Phase 5 — Notes, Tasks, Attachments, Templates
+   ========================================================= */
+
+/* ----- Notes grid -------------------------------------- */
+.notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+  gap: 14px;
+}
+
+/* ----- Note card --------------------------------------- */
+.note-card {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow .15s;
+  min-width: 0;
+}
+.note-card:hover { box-shadow: var(--shadow-md); }
+
+.note-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 4px;
+}
+
+/* ----- Color dot picker -------------------------------- */
+.note-color-bar { display: flex; gap: 5px; align-items: center; }
+
+.note-color-dot {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform .1s, box-shadow .1s;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.note-color-dot:hover { transform: scale(1.4); }
+
+/* ----- Trash button ------------------------------------ */
+.note-trash {
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: .35;
+  font-size: 14px;
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: 4px;
+}
+.note-trash:hover { opacity: 1; background: var(--bg); }
+
+/* ----- Task badges row --------------------------------- */
+.note-badges {
+  padding: 2px 10px 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ----- Contenteditable title / body -------------------- */
+.note-title {
+  font-weight: 600;
+  font-size: 14px;
+  padding: 4px 10px 2px;
+  outline: none;
+  min-height: 24px;
+  color: var(--text);
+  word-break: break-word;
+}
+.note-body {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 4px 10px 8px;
+  outline: none;
+  min-height: 38px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+/* Placeholder text via pseudo-element */
+.note-title:empty::before,
+.note-body:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted);
+  opacity: .4;
+  pointer-events: none;
+}
+/* Subtle focus ring */
+.note-title:focus,
+.note-body:focus {
+  background: rgba(43,108,176,.03);
+  border-radius: 4px;
+}
+
+/* ----- Due date row ------------------------------------ */
+.note-due-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+}
+.note-due-input {
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: transparent;
+  color: var(--text);
+}
+
+/* ----- Tags -------------------------------------------- */
+.note-tags {
+  padding: 4px 10px 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.note-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  background: #EDF2F7;
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.note-tag-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  opacity: .45;
+  color: inherit;
+}
+.note-tag-del:hover { opacity: 1; }
+.note-tag-input {
+  font-size: 11px;
+  border: none;
+  border-bottom: 1px dashed var(--border);
+  width: 90px;
+  padding: 1px 4px;
+  background: transparent;
+  outline: none;
+  color: var(--text-muted);
+}
+.note-tag-input:focus { border-color: var(--primary); }
+
+/* ----- Checklist --------------------------------------- */
+.note-checklist {
+  list-style: none;
+  padding: 2px 10px 0;
+  margin: 0;
+}
+.note-checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.note-check { flex-shrink: 0; cursor: pointer; }
+.note-check-text { flex: 1; font-size: 13px; }
+.note-check-done {
+  text-decoration: line-through;
+  opacity: .45;
+}
+.note-check-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: .25;
+  font-size: 16px;
+  padding: 0 3px;
+  line-height: 1;
+  color: var(--text);
+}
+.note-check-del:hover { opacity: 1; }
+.note-add-check { padding: 4px 10px 6px; }
+.note-check-input {
+  width: 100%;
+  font-size: 12px;
+  border: none;
+  border-bottom: 1px dashed var(--border);
+  padding: 3px 0;
+  background: transparent;
+  outline: none;
+  color: var(--text-muted);
+}
+.note-check-input:focus { border-color: var(--primary); }
+
+/* ----- Note card footer -------------------------------- */
+.note-card-footer {
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  margin-top: auto;
+}
+.note-attach-btn { font-size: 12px !important; }
+.note-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ----- Note filter bar --------------------------------- */
+.note-filter-bar { display: flex; gap: 4px; }
+
+/* ----- Attachment list --------------------------------- */
+.attachment-group-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin: 10px 0 6px;
+}
+.attachment-list { display: flex; flex-direction: column; gap: 6px; }
+.attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #F7FAFC;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.attachment-icon { font-size: 20px; flex-shrink: 0; }
+.attachment-name {
+  flex: 1;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.attachment-meta { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
+/* ----- Template list ----------------------------------- */
+.template-list { display: flex; flex-direction: column; gap: 6px; }
+.template-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #EBF8FF;
+  border: 1px solid #BEE3F8;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.template-name { flex: 1; font-weight: 500; }
+
+/* ----- Upload label trick ------------------------------ */
+.upload-label {
+  display: inline-block;
+  cursor: pointer;
+  margin-bottom: 0;
+}

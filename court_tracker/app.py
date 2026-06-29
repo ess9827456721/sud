@@ -768,6 +768,287 @@ def create_app() -> Flask:
             resp["mismatch_warning"] = warning
         return jsonify(resp)
 
+    # ------------------------------------------------------------------
+    # Notes & Tasks (Phase 5)
+    # ------------------------------------------------------------------
+
+    @app.route("/api/cases/<int:case_id>/notes")
+    def api_get_notes(case_id: int):
+        conn = _get_db()
+        return jsonify(queries.get_notes_for_case(conn, case_id))
+
+    @app.route("/api/cases/<int:case_id>/notes", methods=["POST"])
+    def api_create_note(case_id: int):
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        data["case_id"] = case_id
+        note_id = queries.create_note(conn, data)
+        all_notes = queries.get_notes_for_case(conn, case_id)
+        new_note = next((n for n in all_notes if n["id"] == note_id),
+                        {"id": note_id, "item_type": data.get("item_type", "note"),
+                         "checklist": [], "tags": []})
+        return jsonify(new_note), 201
+
+    @app.route("/api/notes/<int:note_id>", methods=["PUT"])
+    def api_update_note(note_id: int):
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        queries.update_note(conn, note_id, data)
+        return jsonify({"success": True})
+
+    @app.route("/api/notes/<int:note_id>", methods=["DELETE"])
+    def api_delete_note(note_id: int):
+        conn = _get_db()
+        ok = queries.delete_note(conn, note_id)
+        if not ok:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"success": True})
+
+    @app.route("/api/notes/<int:note_id>/checklist", methods=["POST"])
+    def api_add_checklist(note_id: int):
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        text = (data.get("text") or "").strip()
+        if not text:
+            return jsonify({"error": "text required"}), 400
+        item_id = queries.add_checklist_item(conn, note_id, text)
+        return jsonify({"success": True, "id": item_id, "text": text,
+                        "checked": False, "position": 0}), 201
+
+    @app.route("/api/checklist/<int:item_id>/toggle", methods=["PATCH"])
+    def api_toggle_checklist(item_id: int):
+        conn = _get_db()
+        new_state = queries.toggle_checklist_item(conn, item_id)
+        if new_state is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"success": True, "checked": new_state})
+
+    @app.route("/api/checklist/<int:item_id>", methods=["DELETE"])
+    def api_delete_checklist(item_id: int):
+        conn = _get_db()
+        ok = queries.delete_checklist_item(conn, item_id)
+        if not ok:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"success": True})
+
+    @app.route("/api/notes/<int:note_id>/tags", methods=["POST"])
+    def api_add_tag(note_id: int):
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        tag = (data.get("tag") or "").strip()
+        if not tag:
+            return jsonify({"error": "tag required"}), 400
+        queries.add_note_tag(conn, note_id, tag)
+        return jsonify({"success": True, "tag": tag})
+
+    @app.route("/api/notes/<int:note_id>/tags", methods=["DELETE"])
+    def api_delete_tag(note_id: int):
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        tag = (data.get("tag") or "").strip()
+        if not tag:
+            return jsonify({"error": "tag required"}), 400
+        queries.delete_note_tag(conn, note_id, tag)
+        return jsonify({"success": True})
+
+    @app.route("/api/tags")
+    def api_tags():
+        conn = _get_db()
+        return jsonify(queries.get_all_tags(conn))
+
+    @app.route("/api/notes/reorder", methods=["POST"])
+    def api_reorder_notes():
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        case_id = data.get("case_id")
+        ordered_ids = data.get("ordered_ids", [])
+        if not case_id or not ordered_ids:
+            return jsonify({"error": "case_id and ordered_ids required"}), 400
+        queries.reorder_notes(conn, int(case_id), [int(i) for i in ordered_ids])
+        return jsonify({"success": True})
+
+    # ------------------------------------------------------------------
+    # Attachments (Phase 5)
+    # ------------------------------------------------------------------
+
+    from court_tracker.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB
+
+    def _allowed_file(filename: str) -> bool:
+        return "." in filename and \
+               filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+    @app.route("/api/cases/<int:case_id>/attachments")
+    def api_get_attachments(case_id: int):
+        conn = _get_db()
+        return jsonify(queries.get_attachments_for_case(conn, case_id))
+
+    @app.route("/api/cases/<int:case_id>/attachments", methods=["POST"])
+    def api_upload_attachment(case_id: int):
+        import os
+        import uuid
+        from flask import send_file as _sf
+        from court_tracker.config import ATTACHMENTS_DIR
+
+        conn = _get_db()
+        case = queries.get_case_full(conn, case_id)
+        if not case:
+            return jsonify({"error": "case not found"}), 404
+
+        if "file" not in request.files:
+            return jsonify({"error": "no file"}), 400
+        file = request.files["file"]
+        if not file.filename:
+            return jsonify({"error": "empty filename"}), 400
+        if not _allowed_file(file.filename):
+            return jsonify({"error": "file type not allowed"}), 400
+
+        file.seek(0, 2)
+        size = file.tell()
+        file.seek(0)
+        if size > MAX_FILE_SIZE_MB * 1024 * 1024:
+            return jsonify({"error": f"file too large (max {MAX_FILE_SIZE_MB} MB)"}), 400
+
+        ext = os.path.splitext(file.filename)[1].lower()
+        stored = f"{uuid.uuid4().hex}{ext}"
+        dest = ATTACHMENTS_DIR / stored
+        file.save(str(dest))
+
+        note_id_raw = request.form.get("note_id")
+        note_id = int(note_id_raw) if note_id_raw else None
+
+        att_id = queries.create_attachment(conn, {
+            "case_id":     case_id,
+            "note_id":     note_id,
+            "filename":    file.filename,
+            "stored_name": stored,
+            "file_path":   str(dest),
+            "file_size":   size,
+            "mime_type":   file.content_type,
+        })
+        all_att = queries.get_attachments_for_case(conn, case_id)
+        att = next((a for a in all_att if a["id"] == att_id), {"id": att_id})
+        return jsonify(att), 201
+
+    @app.route("/api/cases/<int:case_id>/attachments/<int:att_id>/download")
+    def api_download_attachment(case_id: int, att_id: int):
+        from flask import send_file as _sf
+        conn = _get_db()
+        row = conn.execute(
+            "SELECT * FROM attachments WHERE id=? AND case_id=?", (att_id, case_id)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        att = dict(row)
+        return _sf(att["file_path"], as_attachment=True,
+                   download_name=att["filename"])
+
+    @app.route("/api/attachments/<int:att_id>", methods=["DELETE"])
+    def api_delete_attachment(att_id: int):
+        import os
+        conn = _get_db()
+        file_path = queries.delete_attachment(conn, att_id)
+        if not file_path:
+            return jsonify({"error": "not found"}), 404
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+        return jsonify({"success": True})
+
+    # ------------------------------------------------------------------
+    # Document Templates (Phase 5)
+    # ------------------------------------------------------------------
+
+    @app.route("/templates")
+    def templates_list():
+        import os
+        from court_tracker.config import TEMPLATES_DIR
+        files = sorted(
+            f for f in os.listdir(str(TEMPLATES_DIR))
+            if f.lower().endswith(".docx")
+        )
+        return jsonify([{"filename": f} for f in files])
+
+    @app.route("/templates/generate", methods=["POST"])
+    def templates_generate():
+        import os
+        import uuid
+        from flask import send_file as _sf
+        from court_tracker.config import TEMPLATES_DIR, TEMP_DIR
+
+        data = request.get_json(force=True, silent=True) or {}
+        template_filename = data.get("template_filename", "")
+        case_id = data.get("case_id")
+
+        if not template_filename or not case_id:
+            return jsonify({"error": "template_filename and case_id required"}), 400
+        if "/" in template_filename or "\\" in template_filename \
+                or not template_filename.lower().endswith(".docx"):
+            return jsonify({"error": "invalid filename"}), 400
+
+        template_path = TEMPLATES_DIR / template_filename
+        if not template_path.exists():
+            return jsonify({"error": "template not found"}), 404
+
+        conn = _get_db()
+        case = queries.get_case_full(conn, int(case_id))
+        if not case:
+            return jsonify({"error": "case not found"}), 404
+
+        participants = case.get("participants", [])
+        plaintiff  = next(
+            (p["name"] for p in participants
+             if p.get("role") and "истец" in p["role"].lower()), "")
+        respondent = next(
+            (p["name"] for p in participants
+             if p.get("role") and "ответчик" in p["role"].lower()), "")
+        client_name = ""
+        if case.get("client_id"):
+            cl_row = conn.execute(
+                "SELECT name FROM clients WHERE id=?", (case["client_id"],)
+            ).fetchone()
+            if cl_row:
+                client_name = cl_row[0]
+
+        placeholders = {
+            "{{номер_дела}}": case.get("case_number") or "",
+            "{{суд}}":        case.get("court") or "",
+            "{{судья}}":      case.get("judge") or "",
+            "{{истец}}":      plaintiff,
+            "{{ответчик}}":   respondent,
+            "{{дата}}":       datetime.utcnow().strftime("%d.%m.%Y"),
+            "{{клиент}}":     client_name,
+            "{{сумма_иска}}": "",
+        }
+
+        def _replace_in_para(para):
+            for key, val in placeholders.items():
+                if key in para.text:
+                    for run in para.runs:
+                        if key in run.text:
+                            run.text = run.text.replace(key, val)
+
+        try:
+            from docx import Document as _DocxDocument
+            doc = _DocxDocument(str(template_path))
+            for para in doc.paragraphs:
+                _replace_in_para(para)
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            _replace_in_para(para)
+            out_name = f"{uuid.uuid4().hex}_{template_filename}"
+            out_path = TEMP_DIR / out_name
+            doc.save(str(out_path))
+        except Exception as exc:
+            return jsonify({"error": f"generation failed: {exc}"}), 500
+
+        from flask import send_file as _sf
+        safe_case_number = (case.get("case_number") or "case").replace("/", "-")
+        return _sf(str(out_path), as_attachment=True,
+                   download_name=f"{safe_case_number}_{template_filename}")
+
     return app
 
 

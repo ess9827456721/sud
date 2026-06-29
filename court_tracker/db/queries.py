@@ -653,6 +653,144 @@ def move_kanban(conn: sqlite3.Connection, case_id: int, new_stage: str) -> Optio
     return None
 
 
+# ---------------------------------------------------------------------------
+# Notes / Tasks — extended CRUD (Phase 5)
+# ---------------------------------------------------------------------------
+
+def update_note(conn: sqlite3.Connection, note_id: int, data: dict) -> bool:
+    allowed = {'title', 'body', 'color', 'task_status', 'task_due_date',
+               'task_priority', 'position'}
+    sets: list[str] = []
+    params: list[Any] = []
+    for k, v in data.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return False
+    sets.append("updated_at=?")
+    params.append(_now())
+    params.append(note_id)
+    cur = conn.execute(
+        f"UPDATE notes_and_tasks SET {', '.join(sets)} WHERE id=?",
+        params,
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_note(conn: sqlite3.Connection, note_id: int) -> bool:
+    cur = conn.execute("DELETE FROM notes_and_tasks WHERE id=?", (note_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def add_checklist_item(conn: sqlite3.Connection, note_id: int, text: str) -> int:
+    pos = conn.execute(
+        "SELECT COUNT(*) FROM checklist_items WHERE note_id=?", (note_id,)
+    ).fetchone()[0]
+    cur = conn.execute(
+        "INSERT INTO checklist_items(note_id, text, checked, position) VALUES (?,?,0,?)",
+        (note_id, text, pos),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def toggle_checklist_item(conn: sqlite3.Connection, item_id: int) -> Optional[bool]:
+    row = conn.execute("SELECT checked FROM checklist_items WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        return None
+    new_val = 0 if row[0] else 1
+    conn.execute("UPDATE checklist_items SET checked=? WHERE id=?", (new_val, item_id))
+    conn.commit()
+    return bool(new_val)
+
+
+def delete_checklist_item(conn: sqlite3.Connection, item_id: int) -> bool:
+    cur = conn.execute("DELETE FROM checklist_items WHERE id=?", (item_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def add_note_tag(conn: sqlite3.Connection, note_id: int, tag: str) -> bool:
+    existing = conn.execute(
+        "SELECT id FROM note_tags WHERE note_id=? AND tag=?", (note_id, tag)
+    ).fetchone()
+    if existing:
+        return False
+    conn.execute("INSERT INTO note_tags(note_id, tag) VALUES (?,?)", (note_id, tag))
+    conn.commit()
+    return True
+
+
+def delete_note_tag(conn: sqlite3.Connection, note_id: int, tag: str) -> bool:
+    cur = conn.execute("DELETE FROM note_tags WHERE note_id=? AND tag=?", (note_id, tag))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_all_tags(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute("SELECT DISTINCT tag FROM note_tags ORDER BY tag").fetchall()
+    return [r[0] for r in rows]
+
+
+def reorder_notes(conn: sqlite3.Connection, case_id: int, ordered_ids: list[int]) -> None:
+    for pos, note_id in enumerate(ordered_ids):
+        conn.execute(
+            "UPDATE notes_and_tasks SET position=? WHERE id=? AND case_id=?",
+            (pos, note_id, case_id),
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Attachments (Phase 5)
+# ---------------------------------------------------------------------------
+
+def create_attachment(conn: sqlite3.Connection, data: dict) -> int:
+    now = _now()
+    cur = conn.execute(
+        """INSERT INTO attachments
+            (case_id, note_id, filename, stored_name, file_path,
+             file_size, mime_type, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            data["case_id"], data.get("note_id"), data["filename"],
+            data["stored_name"], data["file_path"],
+            data.get("file_size"), data.get("mime_type"), now,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_attachments_for_case(conn: sqlite3.Connection, case_id: int) -> list[dict]:
+    cur = conn.execute(
+        """SELECT a.*, n.title AS note_title
+           FROM attachments a
+           LEFT JOIN notes_and_tasks n ON n.id = a.note_id
+           WHERE a.case_id=?
+           ORDER BY a.created_at DESC""",
+        (case_id,),
+    )
+    return _rows(cur)
+
+
+def delete_attachment(conn: sqlite3.Connection, att_id: int) -> Optional[str]:
+    """Delete DB row and return file_path so caller can remove from disk."""
+    row = conn.execute("SELECT file_path FROM attachments WHERE id=?", (att_id,)).fetchone()
+    if not row:
+        return None
+    conn.execute("DELETE FROM attachments WHERE id=?", (att_id,))
+    conn.commit()
+    return row[0]
+
+
+# ---------------------------------------------------------------------------
+# get_case_critical_deadline (Phase 4, kept here)
+# ---------------------------------------------------------------------------
+
 def get_case_critical_deadline(conn: sqlite3.Connection, case_id: int) -> Optional[str]:
     """Return deadline_date if any non-done deadline is within 3 days."""
     from datetime import date, timedelta
