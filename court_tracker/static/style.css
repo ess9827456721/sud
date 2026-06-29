@@ -1004,3 +1004,32 @@ select.form-control { cursor: pointer; }
 .mt-2 { margin-top: 10px; }
 .mt-3 { margin-top: 16px; }
 .mb-3 { margin-bottom: 16px; }
+
+/* ================================================================
+   PHASE 7.2 — Participant manual-priority UI
+   ================================================================ */
+
+.part-field {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 1px;
+}
+.part-field:hover { border-bottom-color: var(--primary); color: var(--primary); }
+
+.lock-icon {
+  cursor: pointer;
+  font-size: 12px;
+  margin-left: 4px;
+  opacity: .7;
+  user-select: none;
+  vertical-align: middle;
+}
+.lock-icon:hover { opacity: 1; }
+
+.auto-icon {
+  font-size: 11px;
+  margin-left: 4px;
+  opacity: .4;
+  user-select: none;
+  vertical-align: middle;
+}

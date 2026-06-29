@@ -138,7 +138,7 @@ class SyncScheduler:
                     continue
                 details["case_number"] = case["case_number"]
                 cid = queries.upsert_case(conn, details)
-                queries.save_participants(conn, cid, details.get("participants", []))
+                queries.save_participants(conn, cid, details.get("participants", []), smart=False)
 
                 old_events = {
                     (e["event_date"], e["event_type"])
@@ -212,7 +212,7 @@ class SyncScheduler:
                         queries.upsert_case_field(conn, case["id"], "status", ci["status"])
 
                     if result.get("participants"):
-                        queries.save_participants(conn, case["id"], result["participants"])
+                        queries.save_participants(conn, case["id"], result["participants"], smart=True)
 
                     queries.update_soy_scrape_status(conn, case["id"], "success")
                     queries.log_sync(conn, case["id"], True, "scheduler СОЮ sync")

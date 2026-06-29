@@ -231,19 +231,70 @@
 
   <!-- Participants -->
   <div class="card">
-    <div class="card-header"><h2>👥 Участники</h2></div>
+    <div class="card-header">
+      <h2>👥 Участники</h2>
+      {% if case['source'] == 'soy' %}
+        <span class="text-muted" style="font-size:12px">
+          🔒 — введено вручную &nbsp;|&nbsp; 🤖 — из парсера
+        </span>
+      {% endif %}
+    </div>
     <div class="card-body">
       {% if case['participants'] %}
-        <table class="data-table">
+        <table class="data-table" id="participants-table">
           <thead>
-            <tr><th>Роль</th><th>Наименование</th><th>ИНН</th></tr>
+            <tr>
+              <th>Роль</th>
+              <th>Наименование</th>
+              <th>ИНН</th>
+              {% if case['source'] == 'soy' %}<th>Представитель</th>{% endif %}
+            </tr>
           </thead>
           <tbody>
             {% for p in case['participants'] %}
-              <tr>
+              <tr id="prow-{{ p['id'] }}">
                 <td><span class="text-small text-muted">{{ p['role'] or '—' }}</span></td>
-                <td>{{ p['name'] or '—' }}</td>
-                <td class="text-small text-muted">{{ p['inn'] or '' }}</td>
+
+                {# Name cell #}
+                <td>
+                  {% if case['source'] == 'soy' %}
+                    <span class="part-field" id="pname-{{ p['id'] }}"
+                          onclick="editPartField({{ p['id'] }}, 'name', this)">
+                      {{ p['name'] or '—' }}
+                    </span>
+                    {% if p['name_manual'] %}
+                      <span class="lock-icon" title="Введено вручную — парсер не перезапишет"
+                            onclick="unfreezeField({{ p['id'] }}, 'name')">🔒</span>
+                    {% else %}
+                      <span class="auto-icon" title="Из парсера">🤖</span>
+                    {% endif %}
+                  {% else %}
+                    {{ p['name'] or '—' }}
+                  {% endif %}
+                </td>
+
+                {# INN cell #}
+                <td class="text-small">
+                  {% if case['source'] == 'soy' %}
+                    <span class="part-field" id="pinn-{{ p['id'] }}"
+                          onclick="editPartField({{ p['id'] }}, 'inn', this)">
+                      {{ p['inn'] or '—' }}
+                    </span>
+                    {% if p['inn_manual'] %}
+                      <span class="lock-icon" title="Введено вручную — парсер не перезапишет"
+                            onclick="unfreezeField({{ p['id'] }}, 'inn')">🔒</span>
+                    {% elif p['inn'] %}
+                      <span class="auto-icon" title="Из парсера">🤖</span>
+                    {% endif %}
+                  {% else %}
+                    {{ p['inn'] or '' }}
+                  {% endif %}
+                </td>
+
+                {# Representative (SOY only) #}
+                {% if case['source'] == 'soy' %}
+                  <td class="text-small text-muted">{{ p.get('representative') or '' }}</td>
+                {% endif %}
               </tr>
             {% endfor %}
           </tbody>
@@ -741,6 +792,71 @@
   }
 </style>
 <script>
+// ── Participant inline edit + freeze/unfreeze ─────────────────────────────
+function editPartField(partId, field, spanEl) {
+  var current = spanEl.textContent.trim();
+  if (current === '—') current = '';
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.value = current;
+  input.className = 'form-control';
+  input.style.cssText = 'display:inline-block;width:160px;padding:2px 6px;font-size:13px';
+  spanEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  function save() {
+    var val = input.value.trim();
+    fetch('/api/participants/' + partId, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({field: field, value: val})
+    })
+    .then(r => r.json())
+    .then(function(d) {
+      var span = document.createElement('span');
+      span.className = 'part-field';
+      span.id = 'p' + field + '-' + partId;
+      span.textContent = val || '—';
+      span.onclick = function() { editPartField(partId, field, span); };
+      input.replaceWith(span);
+      // Update lock icon
+      var row = document.getElementById('prow-' + partId);
+      if (row) {
+        var icons = row.querySelectorAll('.lock-icon[data-field=' + field + '], .auto-icon[data-field=' + field + ']');
+        icons.forEach(function(ic) { ic.remove(); });
+        var lock = document.createElement('span');
+        lock.className = 'lock-icon';
+        lock.setAttribute('data-field', field);
+        lock.title = 'Введено вручную — парсер не перезапишет';
+        lock.textContent = '🔒';
+        lock.onclick = function() { unfreezeField(partId, field); };
+        span.insertAdjacentElement('afterend', lock);
+      }
+    })
+    .catch(function() { input.replaceWith(spanEl); });
+  }
+
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.replaceWith(spanEl); }
+  });
+}
+
+function unfreezeField(partId, field) {
+  if (!confirm('Разрешить парсеру обновлять это поле автоматически?')) return;
+  fetch('/api/participants/' + partId + '/unfreeze', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({field: field})
+  })
+  .then(r => r.json())
+  .then(function(d) {
+    if (d.success) location.reload();
+  });
+}
+
 function syncSoyNow(caseId) {
   var btn = event.target;
   btn.disabled = true;

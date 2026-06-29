@@ -1271,7 +1271,17 @@ def create_app() -> Flask:
             if ci.get("judge"):
                 queries.upsert_case_field(conn, case_id, "judge", ci["judge"])
             if result.get("participants"):
-                queries.save_participants(conn, case_id, result["participants"])
+                queries.save_participants(conn, case_id, result["participants"], smart=True)
+            # Save extended case_info fields from SOY
+            ci = result.get("case_info") or {}
+            _SOY_SAFE_FIELDS = {
+                "judge", "case_category", "case_category_path",
+                "receipt_date", "decision_date", "decision_result",
+                "court_first", "uid",
+            }
+            for field, val in ci.items():
+                if field in _SOY_SAFE_FIELDS and val:
+                    queries.upsert_case_field(conn, case_id, field, val)
             queries.update_soy_scrape_status(conn, case_id, "success")
             queries.log_sync(conn, case_id, True, "manual СОЮ sync")
             return jsonify({"success": True, "status": "success",
@@ -1295,6 +1305,33 @@ def create_app() -> Flask:
         )
         conn.commit()
         return jsonify({"success": True, "enabled": enabled})
+
+    # ------------------------------------------------------------------
+    # Participants — manual/freeze API (Phase 7.2)
+    # ------------------------------------------------------------------
+
+    @app.route("/api/participants/<int:part_id>", methods=["PATCH"])
+    def api_participant_edit(part_id: int):
+        """Manually edit a participant field and freeze it (_manual=1)."""
+        data = request.get_json(force=True, silent=True) or {}
+        field = data.get("field", "")
+        value = data.get("value", "")
+        if field not in ("inn", "name", "address"):
+            return jsonify({"success": False, "error": "field must be inn, name or address"}), 400
+        conn = _get_db()
+        ok = queries.freeze_participant_field(conn, part_id, field, value)
+        if ok:
+            return jsonify({"success": True, "frozen": True, "field": field})
+        return jsonify({"success": False, "error": "participant not found"}), 404
+
+    @app.route("/api/participants/<int:part_id>/unfreeze", methods=["POST"])
+    def api_participant_unfreeze(part_id: int):
+        """Remove manual freeze from one or all fields of a participant."""
+        data = request.get_json(force=True, silent=True) or {}
+        field = data.get("field")  # None → unfreeze all
+        conn = _get_db()
+        queries.unfreeze_participant_field(conn, part_id, field)
+        return jsonify({"success": True, "field": field or "all"})
 
     # ------------------------------------------------------------------
     # Scheduler API (Phase 7)

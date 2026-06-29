@@ -155,14 +155,113 @@ def get_case_by_number(conn: sqlite3.Connection, case_number: str) -> Optional[d
 # Participants
 # ---------------------------------------------------------------------------
 
-def save_participants(conn: sqlite3.Connection, case_id: int, participants: list[dict]) -> None:
-    conn.execute("DELETE FROM participants WHERE case_id = ?", (case_id,))
+def save_participants(conn: sqlite3.Connection, case_id: int,
+                      participants: list[dict], smart: bool = False) -> None:
+    """
+    Insert or update participants for a case.
+
+    smart=False (default, KAD): delete-and-replace — always authoritative.
+    smart=True  (SOY scraper): merge preserving _manual-flagged fields.
+      - Match existing row by (role, first-20-chars-of-name).
+      - If matched: only overwrite fields where {field}_manual == 0.
+      - If no match: insert as new participant.
+    """
+    if not smart:
+        conn.execute("DELETE FROM participants WHERE case_id = ?", (case_id,))
+        for p in participants:
+            conn.execute(
+                """INSERT INTO participants
+                   (case_id, role, name, inn, address, representative,
+                    inn_manual, name_manual, address_manual)
+                   VALUES (?,?,?,?,?,?,0,0,0)""",
+                (case_id, p.get("role"), p.get("name"), p.get("inn"),
+                 p.get("address"), p.get("representative")),
+            )
+        conn.commit()
+        return
+
+    # ── Smart merge (SOY) ────────────────────────────────────────────────
+    existing = conn.execute(
+        "SELECT * FROM participants WHERE case_id = ?", (case_id,)
+    ).fetchall()
+    # Build lookup: (normalised_role, normalised_name_prefix) → row
+    def _key(role, name):
+        return ((role or "").lower().strip(),
+                (name or "").lower().strip()[:20])
+
+    existing_map = {_key(r["role"], r["name"]): r for r in existing}
+
     for p in participants:
+        key = _key(p.get("role"), p.get("name"))
+        ex = existing_map.get(key)
+
+        if ex:
+            # Update only non-manual fields
+            updates, vals = [], []
+            for field in ("name", "inn", "address", "representative"):
+                manual_flag = f"{field}_manual"
+                # representative has no manual flag — always update
+                if field == "representative" or not ex[manual_flag]:
+                    updates.append(f"{field}=?")
+                    vals.append(p.get(field))
+            if updates:
+                vals.append(ex["id"])
+                conn.execute(
+                    f"UPDATE participants SET {', '.join(updates)} WHERE id=?", vals
+                )
+        else:
+            conn.execute(
+                """INSERT INTO participants
+                   (case_id, role, name, inn, address, representative,
+                    inn_manual, name_manual, address_manual)
+                   VALUES (?,?,?,?,?,?,0,0,0)""",
+                (case_id, p.get("role"), p.get("name"), p.get("inn"),
+                 p.get("address"), p.get("representative")),
+            )
+
+    conn.commit()
+
+
+def freeze_participant_field(conn: sqlite3.Connection,
+                             participant_id: int, field: str,
+                             value: str) -> bool:
+    """
+    Manually set a participant field and mark it as frozen (_manual=1).
+    field must be one of: inn, name, address.
+    """
+    if field not in ("inn", "name", "address"):
+        return False
+    conn.execute(
+        f"UPDATE participants SET {field}=?, {field}_manual=1 WHERE id=?",
+        (value, participant_id),
+    )
+    conn.commit()
+    return conn.execute(
+        "SELECT changes()"
+    ).fetchone()[0] > 0
+
+
+def unfreeze_participant_field(conn: sqlite3.Connection,
+                               participant_id: int,
+                               field: Optional[str] = None) -> bool:
+    """
+    Clear manual flag(s) for a participant.
+    If field is None, clears all three flags.
+    """
+    if field and field not in ("inn", "name", "address"):
+        return False
+    if field:
         conn.execute(
-            "INSERT INTO participants(case_id, role, name, inn, address) VALUES (?,?,?,?,?)",
-            (case_id, p.get("role"), p.get("name"), p.get("inn"), p.get("address")),
+            f"UPDATE participants SET {field}_manual=0 WHERE id=?",
+            (participant_id,),
+        )
+    else:
+        conn.execute(
+            "UPDATE participants SET inn_manual=0, name_manual=0, address_manual=0 WHERE id=?",
+            (participant_id,),
         )
     conn.commit()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1092,6 +1191,9 @@ def upsert_case_field(conn: sqlite3.Connection, case_id: int,
         "soy_scrape_status", "soy_scrape_last_ok",
         "soy_scrape_error_msg", "soy_scrape_attempts",
         "soy_scraping_enabled",
+        # Phase 7.2 SOY extended fields
+        "case_category", "case_category_path", "uid",
+        "court_first", "receipt_date", "decision_date", "decision_result",
     }
     if field not in safe_fields:
         return

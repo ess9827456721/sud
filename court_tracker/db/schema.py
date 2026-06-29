@@ -234,6 +234,34 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             conn.execute(sql)
             logger.info("Migration applied: added column cases.%s", col)
 
+    # ── participants (Phase 7.2 — manual-priority flags) ────────────────────
+    part_cols = {row[1] for row in conn.execute("PRAGMA table_info(participants)").fetchall()}
+    part_migrations = [
+        ("inn_manual",     "ALTER TABLE participants ADD COLUMN inn_manual     INTEGER NOT NULL DEFAULT 0"),
+        ("name_manual",    "ALTER TABLE participants ADD COLUMN name_manual    INTEGER NOT NULL DEFAULT 0"),
+        ("address_manual", "ALTER TABLE participants ADD COLUMN address_manual INTEGER NOT NULL DEFAULT 0"),
+        ("representative", "ALTER TABLE participants ADD COLUMN representative TEXT"),
+        ("uid",            "ALTER TABLE participants ADD COLUMN uid            TEXT"),
+    ]
+    for col, sql in part_migrations:
+        if col not in part_cols:
+            conn.execute(sql)
+            logger.info("Migration applied: added column participants.%s", col)
+
+    # ── cases (Phase 7.2 — SOY extended fields) ─────────────────────────────
+    for col, sql in [
+        ("case_category",       "ALTER TABLE cases ADD COLUMN case_category       TEXT"),
+        ("case_category_path",  "ALTER TABLE cases ADD COLUMN case_category_path  TEXT"),
+        ("uid",                 "ALTER TABLE cases ADD COLUMN uid                 TEXT"),
+        ("court_first",         "ALTER TABLE cases ADD COLUMN court_first         TEXT"),
+        ("receipt_date",        "ALTER TABLE cases ADD COLUMN receipt_date        TEXT"),
+        ("decision_date",       "ALTER TABLE cases ADD COLUMN decision_date       TEXT"),
+        ("decision_result",     "ALTER TABLE cases ADD COLUMN decision_result     TEXT"),
+    ]:
+        if col not in cases_cols:
+            conn.execute(sql)
+            logger.info("Migration applied: added column cases.%s", col)
+
     # ── clients ─────────────────────────────────────────────────────────────
     client_cols = {row[1] for row in conn.execute("PRAGMA table_info(clients)").fetchall()}
     client_migrations = [
