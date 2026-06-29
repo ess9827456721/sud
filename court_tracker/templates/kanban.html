@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block title %}Канбан{% endblock %}
+{% block page_title %}Канбан-доска{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('case_add') }}" class="btn btn-primary btn-sm">+ Добавить дело</a>
+  <span id="kanban-status" class="text-small text-muted" style="margin-left:8px"></span>
+{% endblock %}
+
+{% block head %}
+<style>
+  .kanban-board {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 16px;
+    align-items: flex-start;
+  }
+  .kanban-col {
+    min-width: 220px;
+    max-width: 240px;
+    flex-shrink: 0;
+    background: #EDF2F7;
+    border-radius: 10px;
+    padding: 0 0 8px;
+  }
+  .kanban-col-header {
+    padding: 10px 14px 8px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-radius: 10px 10px 0 0;
+    background: #E2E8F0;
+  }
+  .kanban-col-header .col-count {
+    background: var(--primary);
+    color: #fff;
+    border-radius: 10px;
+    padding: 1px 7px;
+    font-size: 11px;
+  }
+  .kanban-col.drag-over {
+    background: #BEE3F8;
+    outline: 2px dashed var(--primary);
+  }
+  .kanban-cards {
+    padding: 8px;
+    min-height: 60px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .kanban-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: grab;
+    box-shadow: var(--shadow);
+    transition: box-shadow .15s, opacity .15s;
+    position: relative;
+  }
+  .kanban-card:hover { box-shadow: var(--shadow-md); }
+  .kanban-card.dragging { opacity: .45; }
+  .kanban-card-number {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--primary);
+    margin-bottom: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .kanban-card-court {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .kanban-card-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+  }
+  .kanban-card-client {
+    font-size: 10px;
+    color: var(--text-muted);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hearing-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--primary); flex-shrink: 0;
+    title: attr(data-date);
+  }
+  .critical-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--danger); flex-shrink: 0;
+    animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse {
+    0%,100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(1.35); opacity: .7; }
+  }
+  .mismatch-badge {
+    font-size: 10px;
+    background: #FFFAF0;
+    color: #DD6B20;
+    border: 1px solid #FBD38D;
+    border-radius: 4px;
+    padding: 1px 5px;
+    display: block;
+    margin-top: 4px;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="kanban-board" id="kanban-board">
+  {% for stage in stages %}
+    {% set cards = board[stage] %}
+    <div class="kanban-col"
+         id="col-{{ stage }}"
+         data-stage="{{ stage }}"
+         ondragover="onDragOver(event)"
+         ondrop="onDrop(event)">
+      <div class="kanban-col-header">
+        <span>{{ stage_names[stage] }}</span>
+        <span class="col-count">{{ cards|length }}</span>
+      </div>
+      <div class="kanban-cards" id="cards-{{ stage }}">
+        {% for c in cards %}
+          <div class="kanban-card"
+               id="card-{{ c['id'] }}"
+               draggable="true"
+               ondragstart="onDragStart(event, {{ c['id'] }})"
+               ondragend="onDragEnd(event)"
+               onclick="window.location='{{ url_for('case_detail', case_id=c['id']) }}'">
+
+            <div class="kanban-card-number" title="{{ c['case_number'] }}">
+              {{ c['case_number'] }}
+            </div>
+            <div class="kanban-card-court" title="{{ c['court'] or '' }}">
+              {{ (c['court'] or '—')[:32] }}
+            </div>
+
+            <div class="kanban-card-footer">
+              <span class="badge-pill badge-{{ c['source'] }}" style="font-size:10px">
+                {{ c['source'].upper() }}
+              </span>
+
+              {% if c['next_hearing'] %}
+                <span class="hearing-dot" title="Заседание: {{ c['next_hearing'] }}"></span>
+                <span style="font-size:10px;color:var(--primary)">{{ c['next_hearing'][:10] }}</span>
+              {% endif %}
+
+              {% if c['critical'] %}
+                <span class="critical-dot" title="Критический срок!"></span>
+              {% endif %}
+
+              <span class="kanban-card-client">{{ c['client_name'] or '' }}</span>
+            </div>
+
+            {% set warn_key = 'warn_' ~ c['id'] %}
+            <span class="mismatch-badge" id="warn-{{ c['id'] }}" style="display:none"></span>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  var _draggingId = null;
+  var _dragSrcCol = null;
+
+  function onDragStart(event, caseId) {
+    _draggingId = caseId;
+    _dragSrcCol = event.currentTarget.closest('.kanban-col').dataset.stage;
+    event.currentTarget.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', caseId);
+    event.stopPropagation();
+  }
+
+  function onDragEnd(event) {
+    event.currentTarget.classList.remove('dragging');
+    document.querySelectorAll('.kanban-col').forEach(c => c.classList.remove('drag-over'));
+  }
+
+  function onDragOver(event) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    event.currentTarget.classList.add('drag-over');
+  }
+
+  function onDrop(event) {
+    event.preventDefault();
+    var col = event.currentTarget;
+    col.classList.remove('drag-over');
+    var newStage = col.dataset.stage;
+    if (!_draggingId || newStage === _dragSrcCol) return;
+
+    var statusEl = document.getElementById('kanban-status');
+    statusEl.textContent = 'Перемещение…';
+
+    fetch('/api/kanban/move', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({case_id: _draggingId, new_stage: newStage})
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        // Physically move card DOM node
+        var card = document.getElementById('card-' + _draggingId);
+        if (card) {
+          document.getElementById('cards-' + newStage).appendChild(card);
+          // Update column counts
+          updateCounts();
+        }
+        statusEl.textContent = '✓ Перемещено';
+        // Show mismatch warning on card
+        if (data.mismatch_warning) {
+          var warnEl = document.getElementById('warn-' + _draggingId);
+          if (warnEl) {
+            warnEl.textContent = '⚠ ' + data.mismatch_warning;
+            warnEl.style.display = 'block';
+          }
+        }
+      } else {
+        statusEl.textContent = 'Ошибка: ' + (data.error || '');
+      }
+      setTimeout(() => { statusEl.textContent = ''; }, 3000);
+    })
+    .catch(() => { statusEl.textContent = 'Ошибка сети'; });
+  }
+
+  function updateCounts() {
+    document.querySelectorAll('.kanban-col').forEach(col => {
+      var count = col.querySelectorAll('.kanban-card').length;
+      col.querySelector('.col-count').textContent = count;
+    });
+  }
+</script>
+{% endblock %}

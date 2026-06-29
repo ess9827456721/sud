@@ -10,7 +10,18 @@ from court_tracker.config import DB_PATH, FLASK_HOST, FLASK_PORT, FLASK_DEBUG
 from court_tracker.db.schema import init_db, run_migrations
 from court_tracker.db import queries
 
+
 logger = logging.getLogger(__name__)
+
+
+def _save_events_and_deadlines(conn, case_id: int, events: list) -> None:
+    """Save events then auto-create deadline entries for the case."""
+    queries.save_events(conn, case_id, events)
+    try:
+        from court_tracker.services.deadline_service import auto_create_deadlines_for_case
+        auto_create_deadlines_for_case(conn, case_id)
+    except Exception as exc:
+        logger.warning("auto_create_deadlines error case %s: %s", case_id, exc)
 
 # ---------------------------------------------------------------------------
 # Sync state (shared across threads)
@@ -36,7 +47,7 @@ def _background_sync(app: Flask) -> None:
                         details["case_number"] = case["case_number"]
                         cid = queries.upsert_case(conn, details)
                         queries.save_participants(conn, cid, details.get("participants", []))
-                        queries.save_events(conn, cid, details.get("events", []))
+                        _save_events_and_deadlines(conn, cid, details.get("events", []))
                         queries.log_sync(conn, cid, True, "startup sync")
                 except Exception as exc:
                     queries.log_sync(conn, case["id"], False, str(exc))
@@ -235,7 +246,7 @@ def create_app() -> Flask:
                 case_id = queries.upsert_case(conn, data)
                 if details:
                     queries.save_participants(conn, case_id, details.get("participants", []))
-                    queries.save_events(conn, case_id, details.get("events", []))
+                    _save_events_and_deadlines(conn, case_id, details.get("events", []))
                 queries.log_sync(conn, case_id, True, "manual add-case")
                 flash(f"Дело {case_number} добавлено.", "success")
                 return redirect(url_for("case_detail", case_id=case_id))
@@ -298,7 +309,7 @@ def create_app() -> Flask:
                 details["case_number"] = case["case_number"]
                 queries.upsert_case(conn, details)
                 queries.save_participants(conn, case_id, details.get("participants", []))
-                queries.save_events(conn, case_id, details.get("events", []))
+                _save_events_and_deadlines(conn, case_id, details.get("events", []))
                 queries.log_sync(conn, case_id, True, "manual sync")
                 flash("Синхронизация выполнена.", "success")
             else:
@@ -384,7 +395,7 @@ def create_app() -> Flask:
                 details["case_number"] = case["case_number"]
                 queries.upsert_case(conn, details)
                 queries.save_participants(conn, case_id, details.get("participants", []))
-                queries.save_events(conn, case_id, details.get("events", []))
+                _save_events_and_deadlines(conn, case_id, details.get("events", []))
                 queries.log_sync(conn, case_id, True, "api sync")
                 return jsonify({"success": True, "message": "synced"})
             queries.log_sync(conn, case_id, False, "scraper None")
@@ -634,6 +645,128 @@ def create_app() -> Flask:
         )
         conn.commit()
         return jsonify({"success": True})
+
+    # ------------------------------------------------------------------
+    # Deadlines API (Phase 4)
+    # ------------------------------------------------------------------
+
+    @app.route("/api/cases/<int:case_id>/deadlines")
+    def api_case_deadlines(case_id: int):
+        from court_tracker.services.deadline_service import urgency_level, DEADLINE_RULES
+        conn = _get_db()
+        deadlines = queries.get_deadlines_for_case(conn, case_id)
+        for d in deadlines:
+            d["urgency"] = urgency_level(d.get("deadline_date"))
+        return jsonify(deadlines)
+
+    @app.route("/api/cases/<int:case_id>/deadlines", methods=["POST"])
+    def api_create_deadline(case_id: int):
+        from court_tracker.services.deadline_service import (
+            calculate_deadline, DEADLINE_RULES
+        )
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+
+        # If a rule_key + trigger_date are provided, auto-calculate
+        rule_key = data.get("rule_key")
+        trigger_date_str = data.get("trigger_date")
+        if rule_key and trigger_date_str and rule_key in DEADLINE_RULES:
+            from datetime import date as _date
+            try:
+                td = _date.fromisoformat(trigger_date_str[:10])
+            except ValueError:
+                return jsonify({"error": "invalid trigger_date"}), 400
+            dl_date = calculate_deadline(td, rule_key)
+            rule = DEADLINE_RULES[rule_key]
+            data.setdefault("deadline_type", rule["name"])
+            data.setdefault("statute_reference", rule["statute_reference"])
+            data.setdefault("statute_article", rule["statute_article"])
+            data.setdefault("calculation_note", rule["calculation_note"])
+            data.setdefault("deadline_date", dl_date.isoformat() if dl_date else None)
+            data["is_auto_calculated"] = 1
+            data["trigger_event"] = rule["trigger_event"]
+
+        data["case_id"] = case_id
+        if not data.get("deadline_date"):
+            return jsonify({"error": "deadline_date required"}), 400
+
+        dl_id = queries.create_deadline(conn, data)
+        return jsonify({"success": True, "id": dl_id, "deadline_date": data["deadline_date"]}), 201
+
+    @app.route("/api/deadlines/<int:dl_id>", methods=["PATCH"])
+    def api_update_deadline(dl_id: int):
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        new_date = data.get("deadline_date")
+        if not new_date:
+            return jsonify({"error": "deadline_date required"}), 400
+        ok = queries.update_deadline_date(conn, dl_id, new_date)
+        if not ok:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"success": True, "new_date": new_date, "calculation_note": "изменено вручную"})
+
+    @app.route("/api/deadlines/<int:dl_id>", methods=["DELETE"])
+    def api_delete_deadline(dl_id: int):
+        conn = _get_db()
+        ok = queries.delete_deadline(conn, dl_id)
+        if not ok:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"success": True})
+
+    @app.route("/api/deadlines/<int:dl_id>/done", methods=["PATCH"])
+    def api_toggle_deadline_done(dl_id: int):
+        conn = _get_db()
+        new_state = queries.toggle_deadline_done(conn, dl_id)
+        if new_state is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"success": True, "is_done": new_state})
+
+    # Helper: expose DEADLINE_RULES to front-end
+    @app.route("/api/deadline-rules")
+    def api_deadline_rules():
+        from court_tracker.services.deadline_service import DEADLINE_RULES
+        return jsonify(DEADLINE_RULES)
+
+    # ------------------------------------------------------------------
+    # Kanban (Phase 4)
+    # ------------------------------------------------------------------
+
+    @app.route("/kanban")
+    def kanban():
+        conn = _get_db()
+        board = queries.get_kanban_board(conn)
+        # Attach critical deadline dot info
+        for stage, cases in board.items():
+            for c in cases:
+                c["critical"] = bool(queries.get_case_critical_deadline(conn, c["id"]))
+        return render_template(
+            "kanban.html",
+            board=board,
+            stage_names=queries.STAGE_NAMES,
+            stages=queries.KANBAN_STAGES,
+        )
+
+    @app.route("/api/kanban")
+    def api_kanban():
+        conn = _get_db()
+        board = queries.get_kanban_board(conn)
+        return jsonify(board)
+
+    @app.route("/api/kanban/move", methods=["POST"])
+    def api_kanban_move():
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        case_id = data.get("case_id")
+        new_stage = data.get("new_stage")
+        if not case_id or not new_stage:
+            return jsonify({"error": "case_id and new_stage required"}), 400
+        if new_stage not in queries.KANBAN_STAGES:
+            return jsonify({"error": f"invalid stage: {new_stage}"}), 400
+        warning = queries.move_kanban(conn, int(case_id), new_stage)
+        resp = {"success": True}
+        if warning:
+            resp["mismatch_warning"] = warning
+        return jsonify(resp)
 
     return app
 

@@ -493,3 +493,176 @@ def get_setting(conn: sqlite3.Connection, key: str, default: Optional[str] = Non
 def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)", (key, value))
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Deadlines (Phase 4)
+# ---------------------------------------------------------------------------
+
+def get_deadlines_for_case(conn: sqlite3.Connection, case_id: int) -> list[dict]:
+    cur = conn.execute(
+        "SELECT * FROM deadlines WHERE case_id=? ORDER BY deadline_date",
+        (case_id,),
+    )
+    return _rows(cur)
+
+
+def create_deadline(conn: sqlite3.Connection, data: dict) -> int:
+    now = _now()
+    cur = conn.execute(
+        """INSERT INTO deadlines
+            (case_id, deadline_type, deadline_date, trigger_date, trigger_event,
+             calculation_basis, statute_reference, statute_article, calculation_note,
+             is_auto_calculated, is_manual_override, is_done, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?)""",
+        (
+            data["case_id"],
+            data.get("deadline_type"),
+            data.get("deadline_date"),
+            data.get("trigger_date"),
+            data.get("trigger_event"),
+            data.get("calculation_basis"),
+            data.get("statute_reference"),
+            data.get("statute_article"),
+            data.get("calculation_note"),
+            1 if data.get("is_auto_calculated") else 0,
+            now,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_deadline_date(conn: sqlite3.Connection, deadline_id: int, new_date: str) -> bool:
+    cur = conn.execute(
+        "UPDATE deadlines SET deadline_date=?, is_manual_override=1 WHERE id=?",
+        (new_date, deadline_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def toggle_deadline_done(conn: sqlite3.Connection, deadline_id: int) -> Optional[bool]:
+    row = conn.execute("SELECT is_done FROM deadlines WHERE id=?", (deadline_id,)).fetchone()
+    if not row:
+        return None
+    new_val = 0 if row[0] else 1
+    conn.execute("UPDATE deadlines SET is_done=? WHERE id=?", (new_val, deadline_id))
+    conn.commit()
+    return bool(new_val)
+
+
+def delete_deadline(conn: sqlite3.Connection, deadline_id: int) -> bool:
+    cur = conn.execute("DELETE FROM deadlines WHERE id=?", (deadline_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Kanban (Phase 4)
+# ---------------------------------------------------------------------------
+
+KANBAN_STAGES = ["pretension", "first", "appeal", "cassation", "supreme", "execution", "archive"]
+STAGE_NAMES = {
+    "pretension": "Претензия",
+    "first": "Первая инстанция",
+    "appeal": "Апелляция",
+    "cassation": "Кассация",
+    "supreme": "ВС РФ",
+    "execution": "Исполнение",
+    "archive": "Архив",
+}
+
+# KAD status → expected stage keywords for mismatch detection
+_STAGE_KAD_HINTS: dict[str, list[str]] = {
+    "appeal":    ["апелляц"],
+    "cassation": ["кассац"],
+    "supreme":   ["верховн", "президиум"],
+    "execution": ["исполн"],
+    "archive":   ["прекращ", "завершен", "оставлен без рассмотрения"],
+}
+
+
+def get_kanban_board(conn: sqlite3.Connection) -> dict[str, list[dict]]:
+    """Return all cases grouped by kanban stage, with next hearing date."""
+    board: dict[str, list[dict]] = {s: [] for s in KANBAN_STAGES}
+
+    rows = conn.execute(
+        """SELECT c.id, c.case_number, c.court, c.status, c.source, c.client_id,
+                  cl.name AS client_name,
+                  k.stage,
+                  (SELECT MIN(e.event_date) FROM events e
+                   WHERE e.case_id=c.id AND e.is_future=1) AS next_hearing
+           FROM cases c
+           LEFT JOIN kanban_stage k ON k.case_id = c.id
+           LEFT JOIN clients cl ON cl.id = c.client_id
+           ORDER BY c.case_number"""
+    ).fetchall()
+
+    cols = ["id", "case_number", "court", "status", "source", "client_id",
+            "client_name", "stage", "next_hearing"]
+    for row in rows:
+        r = dict(zip(cols, row))
+        stage = r.get("stage") or "first"
+        if stage not in board:
+            stage = "first"
+        board[stage].append(r)
+
+    return board
+
+
+def check_stage_mismatch(case_status: Optional[str], new_stage: str) -> Optional[str]:
+    if not case_status:
+        return None
+    status_lower = case_status.lower()
+    for stage, keywords in _STAGE_KAD_HINTS.items():
+        if stage == new_stage:
+            continue
+        if any(kw in status_lower for kw in keywords):
+            return (
+                f"КАД показывает «{STAGE_NAMES.get(stage, stage)}», "
+                f"но карточка перемещена в «{STAGE_NAMES.get(new_stage, new_stage)}»"
+            )
+    return None
+
+
+def move_kanban(conn: sqlite3.Connection, case_id: int, new_stage: str) -> Optional[str]:
+    """
+    Update kanban stage. Returns mismatch warning string or None.
+    """
+    now = _now()
+    existing = conn.execute(
+        "SELECT id FROM kanban_stage WHERE case_id=?", (case_id,)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE kanban_stage SET stage=?, moved_at=? WHERE case_id=?",
+            (new_stage, now, case_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO kanban_stage(case_id, stage, moved_at) VALUES (?,?,?)",
+            (case_id, new_stage, now),
+        )
+    conn.commit()
+
+    # Check mismatch
+    row = conn.execute("SELECT status FROM cases WHERE id=?", (case_id,)).fetchone()
+    if row:
+        return check_stage_mismatch(row[0], new_stage)
+    return None
+
+
+def get_case_critical_deadline(conn: sqlite3.Connection, case_id: int) -> Optional[str]:
+    """Return deadline_date if any non-done deadline is within 3 days."""
+    from datetime import date, timedelta
+    cutoff = (date.today() + timedelta(days=3)).isoformat()
+    today = date.today().isoformat()
+    row = conn.execute(
+        """SELECT deadline_date FROM deadlines
+           WHERE case_id=? AND is_done=0
+             AND deadline_date >= ? AND deadline_date <= ?
+           ORDER BY deadline_date LIMIT 1""",
+        (case_id, today, cutoff),
+    ).fetchone()
+    return row[0] if row else None

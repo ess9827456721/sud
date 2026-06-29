@@ -51,19 +51,32 @@
     {% endif %}
   </div>
 
-  <div class="case-links mt-2">
+  <div class="case-links mt-2" id="case-links-bar">
     {% if case['kad_url'] %}
       <a href="{{ case['kad_url'] }}" target="_blank" class="btn btn-secondary btn-sm">🏛 Открыть в КАД ↗</a>
     {% endif %}
-    {% if case['soy_url_first'] %}
-      <a href="{{ case['soy_url_first'] }}" target="_blank" class="btn btn-secondary btn-sm">1-я инстанция ↗</a>
-    {% endif %}
-    {% if case['soy_url_appeal'] %}
-      <a href="{{ case['soy_url_appeal'] }}" target="_blank" class="btn btn-secondary btn-sm">Апелляция ↗</a>
-    {% endif %}
-    {% if case['soy_url_cassation'] %}
-      <a href="{{ case['soy_url_cassation'] }}" target="_blank" class="btn btn-secondary btn-sm">Кассация ↗</a>
-    {% endif %}
+
+    {# SOY URL buttons — each has an inline pencil-edit toggle #}
+    {% for field, label in [('soy_url_first','СОЮ · 1-я инстанция'),
+                            ('soy_url_appeal','СОЮ · Апелляция'),
+                            ('soy_url_cassation','СОЮ · Кассация')] %}
+      <span class="soy-url-group" id="group-{{ field }}" style="display:inline-flex;align-items:center;gap:3px">
+        {% if case[field] %}
+          <a href="{{ case[field] }}" target="_blank" class="btn btn-secondary btn-sm"
+             id="link-{{ field }}">{{ label }} ↗</a>
+        {% else %}
+          <span class="btn btn-secondary btn-sm" style="opacity:.5;cursor:default"
+                id="link-{{ field }}">{{ label }}</span>
+        {% endif %}
+        <button class="btn btn-secondary btn-sm btn-icon" title="Редактировать URL"
+                onclick="toggleSoyEdit('{{ field }}', {{ case['id'] }})">✏</button>
+        <input type="url" id="input-{{ field }}"
+               class="form-control" style="display:none;width:300px;font-size:12px"
+               value="{{ case[field] or '' }}"
+               placeholder="https://…"
+               onblur="saveSoyUrl('{{ field }}', {{ case['id'] }}, this)">
+      </span>
+    {% endfor %}
   </div>
 </div>
 
@@ -185,29 +198,74 @@
   </div>
 </div>
 
-<!-- ===== Placeholder sections ===== -->
-<div class="dash-grid mb-3">
-  <div class="placeholder-section">
-    <span class="ph-icon">⏰</span>
-    <strong>Сроки</strong>
-    <div class="text-small mt-1">Раздел появится в Phase 3</div>
+<!-- ===== Deadlines section ===== -->
+<div class="card mb-3" id="deadlines-card">
+  <div class="card-header">
+    <h2>⏰ Процессуальные сроки</h2>
+    <button class="btn btn-primary btn-sm" onclick="openAddDeadlineModal()">+ Добавить срок</button>
   </div>
+  <div class="card-body" id="deadlines-list">
+    <div class="text-muted text-small" id="deadlines-loading">Загрузка…</div>
+  </div>
+</div>
+
+<!-- Add deadline modal -->
+<div id="deadline-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:300;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:12px;padding:28px;max-width:520px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:var(--shadow-md)">
+    <h2 style="font-size:16px;font-weight:700;margin-bottom:16px">+ Добавить процессуальный срок</h2>
+    <div class="form-group">
+      <label class="form-label">Тип срока (по закону)</label>
+      <select id="modal-rule-key" class="form-control" onchange="onRuleChange()">
+        <option value="">— выбрать правило —</option>
+      </select>
+    </div>
+    <div id="modal-statute-hint" class="deadline-item urgency-safe mb-2" style="display:none;font-size:12px"></div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Дата-триггер</label>
+        <input type="date" id="modal-trigger-date" class="form-control" oninput="onRuleChange()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Расчётная дата (авто)</label>
+        <input type="date" id="modal-calc-date" class="form-control"
+               placeholder="заполняется автоматически" style="background:#F7FAFC">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Переопределить дату вручную</label>
+      <input type="date" id="modal-manual-date" class="form-control">
+      <div class="text-small text-muted mt-1">Если заполнено — использует эту дату вместо расчётной.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Собственное название (если не выбрано правило)</label>
+      <input type="text" id="modal-custom-name" class="form-control" placeholder="Срок подачи отзыва…">
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-primary" onclick="submitDeadline({{ case['id'] }})">Сохранить</button>
+      <button class="btn btn-secondary" onclick="closeDeadlineModal()">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Placeholder sections (Phase 5) -->
+<div class="dash-grid mb-3">
   <div class="placeholder-section">
     <span class="ph-icon">📝</span>
     <strong>Заметки и задачи</strong>
-    <div class="text-small mt-1">Раздел появится в Phase 3</div>
+    <div class="text-small mt-1">Раздел появится в Phase 5</div>
   </div>
-</div>
-<div class="placeholder-section mb-3">
-  <span class="ph-icon">📎</span>
-  <strong>Документы и вложения</strong>
-  <div class="text-small mt-1">Раздел появится в Phase 4</div>
+  <div class="placeholder-section">
+    <span class="ph-icon">📎</span>
+    <strong>Документы и вложения</strong>
+    <div class="text-small mt-1">Раздел появится в Phase 5</div>
+  </div>
 </div>
 
 {% endblock %}
 
 {% block scripts %}
 <script>
+  /* ── Client ── */
   function setClient(caseId, clientId) {
     fetch('/api/cases/' + caseId + '/set-client', {
       method: 'POST',
@@ -215,11 +273,212 @@
       body: JSON.stringify({client_id: clientId || null})
     }).then(r => r.json()).then(d => {
       var ind = document.getElementById('client-save-indicator');
-      if (d.success && ind) {
-        ind.classList.add('show');
-        setTimeout(() => ind.classList.remove('show'), 2000);
+      if (d.success && ind) { ind.classList.add('show'); setTimeout(() => ind.classList.remove('show'), 2000); }
+    });
+  }
+
+  /* ── SOY URLs inline edit ── */
+  function toggleSoyEdit(field, caseId) {
+    var inp = document.getElementById('input-' + field);
+    var lnk = document.getElementById('link-' + field);
+    if (inp.style.display === 'none') {
+      inp.style.display = 'inline-block';
+      lnk.style.display = 'none';
+      inp.focus();
+    } else {
+      inp.style.display = 'none';
+      lnk.style.display = '';
+    }
+  }
+
+  function saveSoyUrl(field, caseId, inp) {
+    var val = inp.value.trim();
+    fetch('/api/autosave', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({table: 'cases', id: caseId, field: field, value: val})
+    }).then(r => r.json()).then(d => {
+      if (d.success) {
+        var lnk = document.getElementById('link-' + field);
+        if (val) {
+          lnk.href = val;
+          lnk.style.opacity = '1';
+          lnk.style.cursor = 'pointer';
+        }
+        inp.style.display = 'none';
+        lnk.style.display = '';
       }
     });
   }
+
+  /* ── Deadlines ── */
+  var _deadlineRules = {};
+
+  function urgencyClass(dateStr) {
+    if (!dateStr) return 'urgency-safe';
+    var d = new Date(dateStr), today = new Date();
+    today.setHours(0,0,0,0);
+    var days = Math.round((d - today) / 86400000);
+    if (days <= 1) return 'urgency-crit';
+    if (days <= 3) return 'urgency-soon';
+    if (days <= 7) return 'urgency-warn';
+    return 'urgency-safe';
+  }
+
+  function loadDeadlines(caseId) {
+    fetch('/api/cases/' + caseId + '/deadlines')
+      .then(r => r.json())
+      .then(items => {
+        var el = document.getElementById('deadlines-list');
+        if (!items.length) {
+          el.innerHTML = '<div class="empty-state"><span class="empty-icon">✅</span>Нет процессуальных сроков</div>';
+          return;
+        }
+        el.innerHTML = items.map(d => renderDeadline(d)).join('');
+      });
+  }
+
+  function renderDeadline(d) {
+    var cls = urgencyClass(d.deadline_date);
+    var doneClass = d.is_done ? 'opacity:.4;' : '';
+    var manualBadge = d.is_manual_override
+      ? '<span class="badge-pill badge-warning" style="font-size:10px">изменено вручную</span>' : '';
+    var doneBadge = d.is_done
+      ? '<span class="badge-pill badge-active" style="font-size:10px">✓ выполнено</span>' : '';
+    return `
+      <div class="deadline-item ${cls}" id="dl-${d.id}" style="${doneClass}">
+        <div class="flex items-center gap-2" style="flex-wrap:wrap">
+          <strong style="flex:1">${escHtml(d.deadline_type || 'Срок')}</strong>
+          <input type="date" value="${d.deadline_date || ''}"
+                 style="font-size:12px;border:1px solid var(--border);border-radius:4px;padding:2px 6px"
+                 onchange="updateDeadlineDate(${d.id}, this.value)"
+                 ${d.is_done ? 'disabled' : ''}>
+          ${manualBadge}${doneBadge}
+          <button onclick="toggleDone(${d.id})"
+                  class="btn btn-secondary btn-sm" title="${d.is_done ? 'Отметить как невыполнено' : 'Отметить выполненным'}">
+            ${d.is_done ? '↩' : '✓'}
+          </button>
+          <button onclick="removeDeadline(${d.id})"
+                  class="btn btn-danger btn-sm btn-icon" title="Удалить">✕</button>
+        </div>
+        ${d.statute_article ? `<div class="dl-meta" style="margin-top:4px">
+          <span class="statute-badge" title="${escHtml(d.calculation_note || '')}">${escHtml(d.statute_article)}</span>
+          ${d.deadline_date ? '<span style="margin-left:8px">→ ' + d.deadline_date + '</span>' : ''}
+        </div>` : ''}
+      </div>`;
+  }
+
+  function escHtml(s) {
+    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function updateDeadlineDate(id, val) {
+    fetch('/api/deadlines/' + id, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({deadline_date: val})
+    }).then(r => r.json()).then(() => loadDeadlines({{ case['id'] }}));
+  }
+
+  function toggleDone(id) {
+    fetch('/api/deadlines/' + id + '/done', {method:'PATCH'})
+      .then(r => r.json()).then(() => loadDeadlines({{ case['id'] }}));
+  }
+
+  function removeDeadline(id) {
+    if (!confirm('Удалить срок?')) return;
+    fetch('/api/deadlines/' + id, {method:'DELETE'})
+      .then(r => r.json()).then(() => loadDeadlines({{ case['id'] }}));
+  }
+
+  /* ── Add deadline modal ── */
+  function openAddDeadlineModal() {
+    document.getElementById('deadline-modal').style.display = 'flex';
+    if (!Object.keys(_deadlineRules).length) {
+      fetch('/api/deadline-rules').then(r => r.json()).then(rules => {
+        _deadlineRules = rules;
+        var sel = document.getElementById('modal-rule-key');
+        sel.innerHTML = '<option value="">— выбрать правило —</option>';
+        Object.entries(rules).forEach(([k,v]) => {
+          sel.innerHTML += `<option value="${k}">${escHtml(v.name)}</option>`;
+        });
+      });
+    }
+  }
+
+  function closeDeadlineModal() {
+    document.getElementById('deadline-modal').style.display = 'none';
+  }
+
+  function onRuleChange() {
+    var rk = document.getElementById('modal-rule-key').value;
+    var td = document.getElementById('modal-trigger-date').value;
+    var hint = document.getElementById('modal-statute-hint');
+    if (rk && _deadlineRules[rk]) {
+      var rule = _deadlineRules[rk];
+      hint.style.display = 'block';
+      hint.innerHTML = `<strong>${escHtml(rule.statute_article)}</strong> — ${escHtml(rule.calculation_note)}`;
+    } else {
+      hint.style.display = 'none';
+    }
+    // Auto-calculate
+    if (rk && td) {
+      fetch('/api/cases/{{ case['id'] }}/deadlines', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({rule_key: rk, trigger_date: td, _preview: true})
+      }).then(r => r.json()).then(d => {
+        if (d.deadline_date)
+          document.getElementById('modal-calc-date').value = d.deadline_date;
+      }).catch(() => {});
+    }
+  }
+
+  function submitDeadline(caseId) {
+    var rk    = document.getElementById('modal-rule-key').value;
+    var td    = document.getElementById('modal-trigger-date').value;
+    var calc  = document.getElementById('modal-calc-date').value;
+    var manual= document.getElementById('modal-manual-date').value;
+    var name  = document.getElementById('modal-custom-name').value.trim();
+    var finalDate = manual || calc;
+    if (!finalDate) { alert('Укажите дату'); return; }
+    var payload = {deadline_date: finalDate};
+    if (rk) { payload.rule_key = rk; payload.trigger_date = td; }
+    else     { payload.deadline_type = name || 'Срок'; }
+    fetch('/api/cases/' + caseId + '/deadlines', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    }).then(r => r.json()).then(d => {
+      if (d.success || d.id) {
+        closeDeadlineModal();
+        loadDeadlines(caseId);
+      }
+    });
+  }
+
+  // Close modal on backdrop click
+  document.getElementById('deadline-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeDeadlineModal();
+  });
+
+  // Boot
+  document.addEventListener('DOMContentLoaded', function() {
+    loadDeadlines({{ case['id'] }});
+  });
 </script>
+
+<style>
+  .statute-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #EBF8FF;
+    color: var(--primary);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: help;
+    border: 1px solid #BEE3F8;
+  }
+</style>
 {% endblock %}

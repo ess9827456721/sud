@@ -469,6 +469,12 @@ select.form-control { cursor: pointer; }
 .form-control-inline:focus  { border-color: var(--primary); background: var(--surface);
                                outline: none; box-shadow: 0 0 0 2px rgba(43,108,176,.12); }
 
+/* ----- Deadline preview in modal ----------------------- */
+#deadline-modal .form-control-inline { width: 100%; }
+
+/* ----- Kanban topbar status ---------------------------- */
+#kanban-status { transition: opacity .3s; }
+
 /* ----- Scrollbar --------------------------------------- */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
