@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Трекер дел{% endblock %} — Трекер судебных дел v2</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<div class="layout">
+
+  <!-- ===== Sidebar ===== -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">⚖</div>
+      <h1>Трекер судебных дел</h1>
+      <span>v2.0</span>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="{{ url_for('index') }}"
+         class="nav-item {% if request.endpoint == 'index' %}active{% endif %}">
+        <span class="nav-icon">🏠</span> Дашборд
+      </a>
+      <a href="{{ url_for('cases_list') }}"
+         class="nav-item {% if request.endpoint in ('cases_list','case_detail','case_add') %}active{% endif %}">
+        <span class="nav-icon">📁</span> Дела
+      </a>
+      <a href="#" class="nav-item text-muted" title="Phase 3">
+        <span class="nav-icon">👥</span> Клиенты
+      </a>
+      <a href="#" class="nav-item text-muted" title="Phase 3">
+        <span class="nav-icon">📋</span> Канбан
+      </a>
+      <a href="#" class="nav-item text-muted" title="Phase 3">
+        <span class="nav-icon">📅</span> Календарь
+      </a>
+      <a href="#" class="nav-item text-muted" title="Phase 4">
+        <span class="nav-icon">📊</span> Аналитика
+      </a>
+      <a href="{{ url_for('settings') }}"
+         class="nav-item {% if request.endpoint == 'settings' %}active{% endif %}">
+        <span class="nav-icon">⚙</span> Настройки
+      </a>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <button class="bell-btn" onclick="window.location='{{ url_for('api_notifications') }}'">
+        <span>🔔</span>
+        <span>Уведомления</span>
+        {% if unread_count > 0 %}
+          <span class="badge">{{ unread_count }}</span>
+        {% endif %}
+      </button>
+    </div>
+  </aside>
+
+  <!-- ===== Main ===== -->
+  <div class="main">
+    <header class="topbar">
+      <span class="topbar-title">{% block page_title %}{% endblock %}</span>
+      <div class="topbar-actions">{% block topbar_actions %}{% endblock %}</div>
+    </header>
+
+    <main class="content">
+
+      <!-- Flash messages -->
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="flash-container" id="flashes">
+            {% for category, message in messages %}
+              <div class="flash-msg flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+
+<!-- Auto-dismiss flash messages -->
+<script>
+  setTimeout(function() {
+    var fc = document.getElementById('flashes');
+    if (fc) fc.style.opacity = '0';
+    setTimeout(function() { if (fc) fc.remove(); }, 400);
+  }, 4000);
+
+  // Global autosave helper
+  function autosave(table, id, field, value, indicator) {
+    fetch('/api/autosave', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({table, id, field, value})
+    }).then(r => r.json()).then(data => {
+      if (indicator) {
+        indicator.classList.add('show');
+        setTimeout(() => indicator.classList.remove('show'), 2000);
+      }
+    });
+  }
+
+  // Wire up all [data-autosave] elements on blur
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-autosave]').forEach(function(el) {
+      el.addEventListener('blur', function() {
+        var cfg = el.dataset.autosave.split(':'); // "table:id:field"
+        var ind = el.parentElement.querySelector('.autosave-indicator');
+        autosave(cfg[0], cfg[1], cfg[2], el.value, ind);
+      });
+    });
+  });
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -177,8 +177,11 @@ def cmd_sync_all() -> None:
 
 
 def cmd_serve() -> None:
-    print("Flask server will be available in Phase 2.")
-    print("Run:  python main.py serve")
+    from court_tracker.app import create_app
+    from court_tracker.config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
+    print(f"Starting Flask on http://{FLASK_HOST}:{FLASK_PORT}")
+    app = create_app()
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG, threaded=True)
 
 
 # ---------------------------------------------------------------------------

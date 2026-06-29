@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block title %}Дашборд{% endblock %}
+{% block page_title %}Дашборд{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('case_add') }}" class="btn btn-primary btn-sm">+ Добавить дело</a>
+{% endblock %}
+
+{% block content %}
+
+<!-- ===== Metrics row ===== -->
+<div class="metrics-grid">
+  <div class="metric-card">
+    <span class="metric-icon">⚖</span>
+    <div class="metric-value">{{ total_active }}</div>
+    <div class="metric-label">Активных дел</div>
+  </div>
+  <div class="metric-card green">
+    <span class="metric-icon">🗓</span>
+    <div class="metric-value">{{ new_this_month }}</div>
+    <div class="metric-label">Добавлено в этом месяце</div>
+  </div>
+  <div class="metric-card">
+    <span class="metric-icon">🏛</span>
+    <div class="metric-value">{{ kad_count }}</div>
+    <div class="metric-label">Дел АС (КАД)</div>
+  </div>
+  <div class="metric-card orange">
+    <span class="metric-icon">⚡</span>
+    <div class="metric-value">{{ soy_count }}</div>
+    <div class="metric-label">Дел СОЮ</div>
+  </div>
+</div>
+
+<!-- ===== Kanban summary ===== -->
+{% if kanban_counts %}
+<div class="card mb-3">
+  <div class="card-header">
+    <h2>📋 Состояние дел по стадиям</h2>
+  </div>
+  <div class="card-body">
+    <div class="kanban-bar">
+      {% set stage_names = {
+        'pretension': 'Претензия',
+        'first': 'Первая инстанция',
+        'appeal': 'Апелляция',
+        'cassation': 'Кассация',
+        'supreme': 'ВС',
+        'execution': 'Исполнение',
+        'archive': 'Архив'
+      } %}
+      {% for stage, count in kanban_counts.items() %}
+        <span class="kanban-chip">{{ stage_names.get(stage, stage) }}: {{ count }}</span>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- ===== Main dashboard grid ===== -->
+<div class="dash-grid">
+
+  <!-- Hearings -->
+  <div class="card">
+    <div class="card-header">
+      <h2>📅 Ближайшие заседания (14 дней)</h2>
+      <a href="{{ url_for('api_upcoming') }}" class="btn btn-secondary btn-sm">API</a>
+    </div>
+    <div class="card-body">
+      {% if upcoming_hearings %}
+        {% for h in upcoming_hearings %}
+          {% set parts = (h['event_date'] or '').split('-') %}
+          <div class="hearing-item">
+            <div class="hearing-date-box">
+              <div class="hd-day">{{ parts[2] if parts|length == 3 else '?' }}</div>
+              <div class="hd-mon">
+                {% set months = ['','янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'] %}
+                {{ months[parts[1]|int] if parts|length == 3 else '' }}
+              </div>
+            </div>
+            <div class="hearing-meta">
+              <div class="hm-case">
+                <a href="{{ url_for('case_detail', case_id=h['case_id']) }}">{{ h['case_number'] }}</a>
+              </div>
+              <div class="hm-court">{{ h['court'] or '—' }}</div>
+              <div class="hm-type">{{ h['event_type'] or '' }} — {{ h['description'][:60] if h['description'] else '' }}</div>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state">
+          <span class="empty-icon">📭</span>
+          Нет ближайших заседаний
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Deadlines -->
+  <div class="card">
+    <div class="card-header">
+      <h2>⏰ Приближающиеся сроки (14 дней)</h2>
+    </div>
+    <div class="card-body">
+      {% if approaching_deadlines %}
+        {% for d in approaching_deadlines %}
+          {% set cls = d['deadline_date'] | urgency_class %}
+          {% set days = d['deadline_date'] | days_until %}
+          <div class="deadline-item {{ cls }}">
+            <span class="dl-date">
+              {% if days == 0 %}Сегодня{% elif days == 1 %}Завтра{% else %}{{ days }} дн.{% endif %}
+            </span>
+            <div class="dl-title">
+              <a href="{{ url_for('case_detail', case_id=d['case_id']) }}">{{ d['case_number'] }}</a>
+              — {{ d['deadline_type'] or 'Срок' }}
+            </div>
+            <div class="dl-meta">
+              {{ d['deadline_date'] }}
+              {% if d['statute_article'] %} · {{ d['statute_article'] }}{% endif %}
+              {% if d['calculation_note'] %} · {{ d['calculation_note'][:60] }}{% endif %}
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state">
+          <span class="empty-icon">✅</span>
+          Нет срочных дедлайнов
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<!-- ===== Recent sync log ===== -->
+<div class="card mt-3">
+  <div class="card-header">
+    <h2>🔄 Последние изменения</h2>
+  </div>
+  <div class="card-body">
+    {% if recent_logs %}
+      {% for log in recent_logs %}
+        <div class="log-item">
+          <span class="log-dot {{ 'ok' if log['success'] else 'err' }}"></span>
+          <span class="log-case">
+            {% if log['case_id'] %}
+              <a href="{{ url_for('case_detail', case_id=log['case_id']) }}">
+                {{ log['case_number'] or ('Дело #' ~ log['case_id']) }}
+              </a>
+            {% else %}
+              Общее
+            {% endif %}
+          </span>
+          <span class="log-msg">{{ log['message'] or '' }}</span>
+          <span class="log-time">{{ (log['synced_at'] or '')[:16] }}</span>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-state">Нет записей синхронизации</div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

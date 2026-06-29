@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}{{ case['case_number'] }}{% endblock %}
+{% block page_title %}Карточка дела{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('cases_list') }}" class="btn btn-secondary btn-sm">← Все дела</a>
+  {% if case['source'] == 'kad' and case['kad_url'] %}
+    <form method="post" action="{{ url_for('case_sync', case_id=case['id']) }}" style="display:inline">
+      <button type="submit" class="btn btn-primary btn-sm">🔄 Синхронизировать</button>
+    </form>
+  {% endif %}
+  <form method="post" action="{{ url_for('case_delete', case_id=case['id']) }}"
+        onsubmit="return confirm('Удалить дело {{ case['case_number'] }}?')">
+    <button type="submit" class="btn btn-danger btn-sm">🗑 Удалить</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+
+<!-- ===== Case header ===== -->
+<div class="case-header">
+  <div class="flex items-center gap-2 mb-1">
+    <span class="badge-pill badge-{{ case['source'] }}">{{ case['source'].upper() }}</span>
+    {% if case['status'] %}
+      <span class="badge-pill badge-active">{{ case['status'] }}</span>
+    {% endif %}
+    {% if case['custom_status'] %}
+      <span class="badge-pill badge-warning">{{ case['custom_status'] }}</span>
+    {% endif %}
+    {% if case['custom_label'] %}
+      <span class="badge-pill" style="background:#EDE9FE;color:#6B46C1">{{ case['custom_label'] }}</span>
+    {% endif %}
+  </div>
+
+  <div class="case-number">{{ case['case_number'] }}</div>
+
+  <div class="case-meta">
+    {% if case['court'] %}
+      <span>🏛 {{ case['court'] }}</span>
+    {% endif %}
+    {% if case['judge'] %}
+      <span>👤 {{ case['judge'] }}</span>
+    {% endif %}
+    {% if case['start_date'] %}
+      <span>📅 {{ case['start_date'] }}</span>
+    {% endif %}
+    {% if case['case_type'] %}
+      <span>📌 {{ case['case_type'] }}</span>
+    {% endif %}
+    {% if case['last_synced_at'] %}
+      <span class="text-muted text-small">Синхронизировано: {{ case['last_synced_at'][:16] }}</span>
+    {% endif %}
+  </div>
+
+  <div class="case-links mt-2">
+    {% if case['kad_url'] %}
+      <a href="{{ case['kad_url'] }}" target="_blank" class="btn btn-secondary btn-sm">🏛 Открыть в КАД ↗</a>
+    {% endif %}
+    {% if case['soy_url_first'] %}
+      <a href="{{ case['soy_url_first'] }}" target="_blank" class="btn btn-secondary btn-sm">1-я инстанция ↗</a>
+    {% endif %}
+    {% if case['soy_url_appeal'] %}
+      <a href="{{ case['soy_url_appeal'] }}" target="_blank" class="btn btn-secondary btn-sm">Апелляция ↗</a>
+    {% endif %}
+    {% if case['soy_url_cassation'] %}
+      <a href="{{ case['soy_url_cassation'] }}" target="_blank" class="btn btn-secondary btn-sm">Кассация ↗</a>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ===== Editable fields ===== -->
+<div class="dash-grid mb-3">
+  <div class="card">
+    <div class="card-header"><h2>✏ Быстрое редактирование</h2></div>
+    <div class="card-body">
+      <div class="form-group">
+        <label class="form-label">Метка (custom_label)</label>
+        <div class="flex items-center gap-2">
+          <input type="text" class="form-control"
+                 value="{{ case['custom_label'] or '' }}"
+                 placeholder="Добавить метку…"
+                 data-autosave="cases:{{ case['id'] }}:custom_label">
+          <span class="autosave-indicator">✓</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Свой статус</label>
+        <div class="flex items-center gap-2">
+          <input type="text" class="form-control"
+                 value="{{ case['custom_status'] or '' }}"
+                 placeholder="Например: Ждём решения"
+                 data-autosave="cases:{{ case['id'] }}:custom_status">
+          <span class="autosave-indicator">✓</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Клиент</label>
+        <select class="form-control" data-autosave="cases:{{ case['id'] }}:client_id">
+          <option value="">— не привязан —</option>
+          {% for cl in clients %}
+            <option value="{{ cl[0] }}" {{ 'selected' if case['client_id'] == cl[0] }}>{{ cl[1] }}</option>
+          {% endfor %}
+        </select>
+        <span class="autosave-indicator">✓</span>
+      </div>
+      {% if case['source'] == 'soy' %}
+        <div class="form-group">
+          <label class="form-label">Автопарсинг СОЮ</label>
+          <select class="form-control" data-autosave="cases:{{ case['id'] }}:soy_scraping_enabled">
+            <option value="1" {{ 'selected' if case['soy_scraping_enabled'] == 1 }}>Включён</option>
+            <option value="0" {{ 'selected' if case['soy_scraping_enabled'] == 0 }}>Выключен</option>
+          </select>
+          <span class="autosave-indicator">✓</span>
+          {% if case['soy_scrape_status'] %}
+            <div class="text-small text-muted mt-1">
+              Статус: {{ case['soy_scrape_status'] }}
+              {% if case['soy_scrape_last_ok'] %} · Последний OK: {{ case['soy_scrape_last_ok'][:16] }}{% endif %}
+              {% if case['soy_scrape_attempts'] %} · Попыток: {{ case['soy_scrape_attempts'] }}{% endif %}
+            </div>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Participants -->
+  <div class="card">
+    <div class="card-header"><h2>👥 Участники</h2></div>
+    <div class="card-body">
+      {% if case['participants'] %}
+        <table class="data-table">
+          <thead>
+            <tr><th>Роль</th><th>Наименование</th><th>ИНН</th></tr>
+          </thead>
+          <tbody>
+            {% for p in case['participants'] %}
+              <tr>
+                <td><span class="text-small text-muted">{{ p['role'] or '—' }}</span></td>
+                <td>{{ p['name'] or '—' }}</td>
+                <td class="text-small text-muted">{{ p['inn'] or '' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="empty-state">Участники не найдены</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ===== Events timeline ===== -->
+<div class="card mb-3">
+  <div class="card-header"><h2>📅 Движение дела</h2></div>
+  <div class="card-body">
+    {% if case['events'] %}
+      <ul class="timeline">
+        {% for ev in case['events'] %}
+          <li class="timeline-item {{ 'future' if ev['is_future'] }}">
+            <span class="timeline-dot"></span>
+            <div>
+              <span style="font-weight:600">{{ ev['event_date'] or '—' }}</span>
+              <span class="text-muted" style="margin-left:8px">{{ ev['event_type'] or '' }}</span>
+              {% if ev['is_future'] %}
+                <span class="badge-pill badge-warning" style="margin-left:6px;font-size:10px">будущее</span>
+              {% endif %}
+              <div class="text-small text-muted mt-1">{{ ev['description'] or '' }}</div>
+              {% if ev['document_url'] %}
+                <a href="{{ ev['document_url'] }}" target="_blank" class="text-small">📄 Документ ↗</a>
+              {% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="empty-state">Нет событий</div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ===== Placeholder sections ===== -->
+<div class="dash-grid mb-3">
+  <div class="placeholder-section">
+    <span class="ph-icon">⏰</span>
+    <strong>Сроки</strong>
+    <div class="text-small mt-1">Раздел появится в Phase 3</div>
+  </div>
+  <div class="placeholder-section">
+    <span class="ph-icon">📝</span>
+    <strong>Заметки и задачи</strong>
+    <div class="text-small mt-1">Раздел появится в Phase 3</div>
+  </div>
+</div>
+<div class="placeholder-section mb-3">
+  <span class="ph-icon">📎</span>
+  <strong>Документы и вложения</strong>
+  <div class="text-small mt-1">Раздел появится в Phase 4</div>
+</div>
+
+{% endblock %}

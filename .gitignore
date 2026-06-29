@@ -1,2 +1,3 @@
 court_tracker/**/__pycache__/
 *.pyc
+court_tracker/data/
