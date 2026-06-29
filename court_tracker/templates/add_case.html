@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}Добавить дело{% endblock %}
+{% block page_title %}Добавить дело{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('cases_list') }}" class="btn btn-secondary btn-sm">← Назад к делам</a>
+{% endblock %}
+
+{% block content %}
+
+<div class="card" style="max-width:720px">
+  <div class="card-header"><h2>Новое дело</h2></div>
+  <div class="card-body">
+
+    <!-- CSS-only tabs -->
+    <div class="tabs" id="tabs">
+      <button type="button" class="tab-btn {{ 'active' if active_tab == 'kad' }}"
+              onclick="switchTab('kad')">🏛 КАД (арбитраж)</button>
+      <button type="button" class="tab-btn {{ 'active' if active_tab == 'soy' }}"
+              onclick="switchTab('soy')">⚖ СОЮ (ручной ввод)</button>
+    </div>
+
+    <!-- KAD tab -->
+    <div class="tab-pane {{ 'active' if active_tab == 'kad' }}" id="tab-kad">
+      <form method="post" action="{{ url_for('case_add') }}">
+        <input type="hidden" name="tab" value="kad">
+        <div class="form-group">
+          <label class="form-label">Номер дела *</label>
+          <input type="text" name="case_number" class="form-control"
+                 placeholder="А40-12345/2024" autofocus required>
+          <div class="text-small text-muted mt-1">
+            Введите номер — приложение откроет КАД и загрузит карточку автоматически.
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary">🔍 Найти и добавить</button>
+      </form>
+    </div>
+
+    <!-- SOY tab -->
+    <div class="tab-pane {{ 'active' if active_tab == 'soy' }}" id="tab-soy">
+      <form method="post" action="{{ url_for('case_add') }}">
+        <input type="hidden" name="tab" value="soy">
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Номер дела *</label>
+            <input type="text" name="case_number" class="form-control"
+                   placeholder="2-1234/2024" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Тип дела</label>
+            <input type="text" name="case_type" class="form-control" placeholder="Гражданское">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Суд</label>
+            <input type="text" name="court" class="form-control"
+                   placeholder="Тверской районный суд г. Москвы">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Судья</label>
+            <input type="text" name="judge" class="form-control">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Статус</label>
+            <input type="text" name="status" class="form-control" placeholder="В производстве">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Дата подачи</label>
+            <input type="date" name="start_date" class="form-control">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Ссылка — 1-я инстанция</label>
+          <input type="url" name="soy_url_first" class="form-control"
+                 placeholder="https://…">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Ссылка — Апелляция</label>
+            <input type="url" name="soy_url_appeal" class="form-control"
+                   placeholder="https://…">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ссылка — Кассация</label>
+            <input type="url" name="soy_url_cassation" class="form-control"
+                   placeholder="https://…">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Истец
+              <button type="button" class="btn btn-secondary btn-sm"
+                      style="float:right;margin-top:-2px"
+                      onclick="egrulFill('plaintiff_inn','plaintiff_name')">🔍 ЕГРЮЛ</button>
+            </label>
+            <input type="text" name="plaintiff_inn" id="plaintiff_inn"
+                   class="form-control mb-1" placeholder="ИНН истца (опционально)">
+            <input type="text" name="plaintiff_name" id="plaintiff_name"
+                   class="form-control" placeholder="Наименование истца">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ответчик
+              <button type="button" class="btn btn-secondary btn-sm"
+                      style="float:right;margin-top:-2px"
+                      onclick="egrulFill('respondent_inn','respondent_name')">🔍 ЕГРЮЛ</button>
+            </label>
+            <input type="text" name="respondent_inn" id="respondent_inn"
+                   class="form-control mb-1" placeholder="ИНН ответчика (опционально)">
+            <input type="text" name="respondent_name" id="respondent_name"
+                   class="form-control" placeholder="Наименование ответчика">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Клиент</label>
+            <select name="client_id" class="form-control">
+              <option value="">— не привязывать —</option>
+              {% for cl in clients %}
+                <option value="{{ cl[0] }}">{{ cl[1] }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Внутренняя метка</label>
+            <input type="text" name="custom_label" class="form-control"
+                   placeholder="VIP / срочно / …">
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-success">💾 Сохранить дело СОЮ</button>
+      </form>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function switchTab(name) {
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+  }
+
+  function egrulFill(innFieldId, nameFieldId) {
+    var inn = document.getElementById(innFieldId).value.trim();
+    if (!inn) { alert('Введите ИНН'); return; }
+    fetch('/api/egrul/' + inn)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { alert('Не найдено в ЕГРЮЛ'); return; }
+        document.getElementById(nameFieldId).value = data.name || data.short_name || '';
+      })
+      .catch(() => alert('Ошибка запроса к ЕГРЮЛ'));
+  }
+</script>
+{% endblock %}

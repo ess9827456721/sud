@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Клиенты{% endblock %}
+{% block page_title %}Клиенты{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('client_add') }}" class="btn btn-primary btn-sm">+ Добавить клиента</a>
+{% endblock %}
+
+{% block content %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Всего клиентов: {{ clients|length }}</h2>
+  </div>
+  <div class="table-container">
+    {% if clients %}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Наименование</th>
+            <th>Тип</th>
+            <th>ИНН</th>
+            <th>Статус ЕГРЮЛ</th>
+            <th>Дел</th>
+            <th>Контактное лицо</th>
+            <th>Телефон</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for cl in clients %}
+            <tr onclick="window.location='{{ url_for('client_detail', client_id=cl['id']) }}'">
+              <td class="text-muted">{{ cl['id'] }}</td>
+              <td>
+                <div class="flex items-center gap-2">
+                  <span class="avatar-sm">{{ (cl['name'] or '?')[0].upper() }}</span>
+                  <div>
+                    <strong>{{ cl['name'] }}</strong>
+                    {% if cl['short_name'] and cl['short_name'] != cl['name'] %}
+                      <div class="text-small text-muted">{{ cl['short_name'] }}</div>
+                    {% endif %}
+                  </div>
+                </div>
+              </td>
+              <td>
+                <span class="badge-pill
+                  {% if cl['type'] == 'legal' %}badge-kad
+                  {% elif cl['type'] == 'ip' %}badge-soy
+                  {% else %}badge-warning{% endif %}">
+                  {{ {'legal':'ЮЛ','ip':'ИП','person':'Физ.лицо'}.get(cl['type'], cl['type']) }}
+                </span>
+              </td>
+              <td class="text-small">{{ cl['inn'] or '—' }}</td>
+              <td>
+                {% if cl['status_egrul'] %}
+                  <span class="badge-pill {{ 'badge-active' if cl['status_egrul'] == 'ACTIVE' else 'badge-danger' }}">
+                    {{ {'ACTIVE':'Действующее','LIQUIDATED':'Ликвидировано','BANKRUPT':'Банкротство'}.get(cl['status_egrul'], cl['status_egrul']) }}
+                  </span>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if cl['case_count'] > 0 %}
+                  <span class="badge-pill badge-active">{{ cl['case_count'] }}</span>
+                {% else %}
+                  <span class="text-muted">0</span>
+                {% endif %}
+              </td>
+              <td>{{ cl['contact_person'] or '—' }}</td>
+              <td class="text-small">{{ cl['phone'] or '—' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">
+        <span class="empty-icon">👥</span>
+        Нет клиентов.
+        <a href="{{ url_for('client_add') }}">Добавить первого клиента</a>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

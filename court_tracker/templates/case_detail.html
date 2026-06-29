@@ -1,0 +1,888 @@
+{% extends "base.html" %}
+{% block title %}{{ case['case_number'] }}{% endblock %}
+{% block page_title %}Карточка дела{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('cases_list') }}" class="btn btn-secondary btn-sm">← Все дела</a>
+  <a href="{{ url_for('export_case_report', case_id=case['id']) }}" class="btn btn-secondary btn-sm">📄 Скачать Word</a>
+  {% if case['source'] == 'kad' and case['kad_url'] %}
+    <form method="post" action="{{ url_for('case_sync', case_id=case['id']) }}" style="display:inline">
+      <button type="submit" class="btn btn-primary btn-sm">🔄 Синхронизировать</button>
+    </form>
+  {% endif %}
+  <form method="post" action="{{ url_for('case_delete', case_id=case['id']) }}"
+        onsubmit="return confirm('Удалить дело {{ case['case_number'] }}?')">
+    <button type="submit" class="btn btn-danger btn-sm">🗑 Удалить</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+
+<!-- ===== Case header ===== -->
+<div class="case-header">
+  <div class="flex items-center gap-2 mb-1">
+    <span class="badge-pill badge-{{ case['source'] }}">{{ case['source'].upper() }}</span>
+    {% if case['status'] %}
+      <span class="badge-pill badge-active">{{ case['status'] }}</span>
+    {% endif %}
+    {% if case['custom_status'] %}
+      <span class="badge-pill badge-warning">{{ case['custom_status'] }}</span>
+    {% endif %}
+    {% if case['custom_label'] %}
+      <span class="badge-pill" style="background:#EDE9FE;color:#6B46C1">{{ case['custom_label'] }}</span>
+    {% endif %}
+  </div>
+
+  <div class="case-number">{{ case['case_number'] }}</div>
+
+  <div class="case-meta">
+    {% if case['court'] %}
+      <span>🏛 {{ case['court'] }}</span>
+    {% endif %}
+    {% if case['judge'] %}
+      <span>👤 {{ case['judge'] }}</span>
+    {% endif %}
+    {% if case['start_date'] %}
+      <span>📅 {{ case['start_date'] }}</span>
+    {% endif %}
+    {% if case['case_type'] %}
+      <span>📌 {{ case['case_type'] }}</span>
+    {% endif %}
+    {% if case['last_synced_at'] %}
+      <span class="text-muted text-small">Синхронизировано: {{ case['last_synced_at'][:16] }}</span>
+    {% endif %}
+  </div>
+
+  <div class="case-links mt-2" id="case-links-bar">
+    {% if case['kad_url'] %}
+      <a href="{{ case['kad_url'] }}" target="_blank" class="btn btn-secondary btn-sm">🏛 Открыть в КАД ↗</a>
+    {% endif %}
+
+    {# SOY URL buttons — each has an inline pencil-edit toggle #}
+    {% for field, label in [('soy_url_first','СОЮ · 1-я инстанция'),
+                            ('soy_url_appeal','СОЮ · Апелляция'),
+                            ('soy_url_cassation','СОЮ · Кассация')] %}
+      <span class="soy-url-group" id="group-{{ field }}" style="display:inline-flex;align-items:center;gap:3px">
+        {% if case[field] %}
+          <a href="{{ case[field] }}" target="_blank" class="btn btn-secondary btn-sm"
+             id="link-{{ field }}">{{ label }} ↗</a>
+        {% else %}
+          <span class="btn btn-secondary btn-sm" style="opacity:.5;cursor:default"
+                id="link-{{ field }}">{{ label }}</span>
+        {% endif %}
+        <button class="btn btn-secondary btn-sm btn-icon" title="Редактировать URL"
+                onclick="toggleSoyEdit('{{ field }}', {{ case['id'] }})">✏</button>
+        <input type="url" id="input-{{ field }}"
+               class="form-control" style="display:none;width:300px;font-size:12px"
+               value="{{ case[field] or '' }}"
+               placeholder="https://…"
+               onblur="saveSoyUrl('{{ field }}', {{ case['id'] }}, this)">
+      </span>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- ===== Editable fields ===== -->
+<div class="dash-grid mb-3">
+  <div class="card">
+    <div class="card-header"><h2>✏ Редактирование</h2></div>
+    <div class="card-body">
+      <div class="form-group">
+        <label class="form-label">Метка (custom_label)</label>
+        <div class="flex items-center gap-2">
+          <input type="text" class="form-control"
+                 value="{{ case['custom_label'] or '' }}"
+                 placeholder="Добавить метку…"
+                 data-autosave="cases:{{ case['id'] }}:custom_label">
+          <span class="autosave-indicator">✓</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Свой статус</label>
+        <div class="flex items-center gap-2">
+          <input type="text" class="form-control"
+                 value="{{ case['custom_status'] or '' }}"
+                 placeholder="Например: Ждём решения"
+                 data-autosave="cases:{{ case['id'] }}:custom_status">
+          <span class="autosave-indicator">✓</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Клиент
+          {% if case['client_id'] %}
+            <a href="{{ url_for('client_detail', client_id=case['client_id']) }}"
+               class="btn btn-secondary btn-sm" style="float:right;margin-top:-2px">
+              👤 Карточка клиента
+            </a>
+          {% endif %}
+        </label>
+        <select class="form-control" id="client-select"
+                onchange="setClient({{ case['id'] }}, this.value)">
+          <option value="">— не привязан —</option>
+          {% for cl in clients %}
+            <option value="{{ cl[0] }}" {{ 'selected' if case['client_id'] == cl[0] }}>{{ cl[1] }}</option>
+          {% endfor %}
+        </select>
+        <span id="client-save-indicator" class="autosave-indicator">✓</span>
+      </div>
+      {% if case['source'] == 'soy' %}
+        {% set soy_status = case['soy_scrape_status'] or 'pending' %}
+        {% set soy_map = {
+          'success': ('green',  '✓', 'Данные актуальны'),
+          'pending': ('gray',   '○', 'Ещё не синхронизировалось'),
+          'failed':  ('red',    '✗', 'Шаблон суда не распознан'),
+          'captcha': ('orange', '!', 'Требуется капча на сайте суда'),
+          'no_data': ('orange', '?', 'Движение дела не найдено'),
+          'manual':  ('gray',   '—', 'Автообновление отключено'),
+        } %}
+        {% set sc, si, st = soy_map.get(soy_status, ('gray','○','Неизвестно')) %}
+        <div class="form-group">
+          <label class="form-label">Автопарсинг СОЮ</label>
+          <div class="soy-sync-status">
+            <span class="sync-indicator sync-{{ sc }}">{{ si }}</span>
+            <span class="sync-label">{{ st }}</span>
+            {% if case['soy_scrape_last_ok'] %}
+              <span class="sync-date">Обновлено: {{ case['soy_scrape_last_ok'][:16] }}</span>
+            {% endif %}
+            {% if case['soy_scrape_attempts'] %}
+              <span class="text-muted text-small">Попыток: {{ case['soy_scrape_attempts'] }}</span>
+            {% endif %}
+          </div>
+          <div class="soy-sync-controls mt-1">
+            <button type="button" class="btn btn-secondary btn-sm"
+                    onclick="syncSoyNow({{ case['id'] }})">🔄 Обновить сейчас</button>
+            <label class="soy-auto-label">
+              <input type="checkbox" id="soy-auto-cb"
+                     {{ 'checked' if case['soy_scraping_enabled'] }}
+                     onchange="toggleSoySync({{ case['id'] }}, this.checked)">
+              Автообновление
+            </label>
+          </div>
+          {% if case['soy_scrape_error_msg'] %}
+            <div class="text-small text-orange mt-1">{{ case['soy_scrape_error_msg'][:120] }}</div>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Financial fields -->
+  <div class="card">
+    <div class="card-header"><h2>💰 Финансы по делу</h2></div>
+    <div class="card-body">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Сумма иска (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['claim_amount'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:claim_amount">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Взыскано (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['awarded_amount'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:awarded_amount">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Госпошлина (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['state_duty'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:state_duty">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Судебные расходы заявлено (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['legal_costs_claimed'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:legal_costs_claimed">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Результат дела</label>
+        <select class="form-control"
+                data-autosave="cases:{{ case['id'] }}:outcome">
+          <option value="">— не определён —</option>
+          <option value="won"     {{ 'selected' if case.get('outcome') == 'won' }}>Выиграно</option>
+          <option value="lost"    {{ 'selected' if case.get('outcome') == 'lost' }}>Проиграно</option>
+          <option value="partial" {{ 'selected' if case.get('outcome') == 'partial' }}>Частично</option>
+          <option value="pending" {{ 'selected' if case.get('outcome') == 'pending' }}>В процессе</option>
+          <option value="other"   {{ 'selected' if case.get('outcome') == 'other' }}>Иное</option>
+        </select>
+        <span class="autosave-indicator">✓</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Participants -->
+  <div class="card">
+    <div class="card-header">
+      <h2>👥 Участники</h2>
+      {% if case['source'] == 'soy' %}
+        <span class="text-muted" style="font-size:12px">
+          🔒 — введено вручную &nbsp;|&nbsp; 🤖 — из парсера
+        </span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      {% if case['participants'] %}
+        <table class="data-table" id="participants-table">
+          <thead>
+            <tr>
+              <th>Роль</th>
+              <th>Наименование</th>
+              <th>ИНН</th>
+              {% if case['source'] == 'soy' %}<th>Представитель</th>{% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in case['participants'] %}
+              <tr id="prow-{{ p['id'] }}">
+                <td><span class="text-small text-muted">{{ p['role'] or '—' }}</span></td>
+
+                {# Name cell #}
+                <td>
+                  {% if case['source'] == 'soy' %}
+                    <span class="part-field" id="pname-{{ p['id'] }}"
+                          onclick="editPartField({{ p['id'] }}, 'name', this)">
+                      {{ p['name'] or '—' }}
+                    </span>
+                    {% if p['name_manual'] %}
+                      <span class="lock-icon" title="Введено вручную — парсер не перезапишет"
+                            onclick="unfreezeField({{ p['id'] }}, 'name')">🔒</span>
+                    {% else %}
+                      <span class="auto-icon" title="Из парсера">🤖</span>
+                    {% endif %}
+                  {% else %}
+                    {{ p['name'] or '—' }}
+                  {% endif %}
+                </td>
+
+                {# INN cell #}
+                <td class="text-small">
+                  {% if case['source'] == 'soy' %}
+                    <span class="part-field" id="pinn-{{ p['id'] }}"
+                          onclick="editPartField({{ p['id'] }}, 'inn', this)">
+                      {{ p['inn'] or '—' }}
+                    </span>
+                    {% if p['inn_manual'] %}
+                      <span class="lock-icon" title="Введено вручную — парсер не перезапишет"
+                            onclick="unfreezeField({{ p['id'] }}, 'inn')">🔒</span>
+                    {% elif p['inn'] %}
+                      <span class="auto-icon" title="Из парсера">🤖</span>
+                    {% endif %}
+                  {% else %}
+                    {{ p['inn'] or '' }}
+                  {% endif %}
+                </td>
+
+                {# Representative (SOY only) #}
+                {% if case['source'] == 'soy' %}
+                  <td class="text-small text-muted">{{ p.get('representative') or '' }}</td>
+                {% endif %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="empty-state">Участники не найдены</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ===== Events timeline ===== -->
+<div class="card mb-3">
+  <div class="card-header"><h2>📅 Движение дела</h2></div>
+  <div class="card-body">
+    {% if case['events'] %}
+      <ul class="timeline">
+        {% for ev in case['events'] %}
+          <li class="timeline-item {{ 'future' if ev['is_future'] }}">
+            <span class="timeline-dot"></span>
+            <div>
+              <span style="font-weight:600">{{ ev['event_date'] or '—' }}</span>
+              <span class="text-muted" style="margin-left:8px">{{ ev['event_type'] or '' }}</span>
+              {% if ev['is_future'] %}
+                <span class="badge-pill badge-warning" style="margin-left:6px;font-size:10px">будущее</span>
+              {% endif %}
+              <div class="text-small text-muted mt-1">{{ ev['description'] or '' }}</div>
+              {% if ev['document_url'] %}
+                <a href="{{ ev['document_url'] }}" target="_blank" class="text-small">📄 Документ ↗</a>
+              {% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="empty-state">Нет событий</div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ===== Deadlines section ===== -->
+<div class="card mb-3" id="deadlines-card">
+  <div class="card-header">
+    <h2>⏰ Процессуальные сроки</h2>
+    <button class="btn btn-primary btn-sm" onclick="openAddDeadlineModal()">+ Добавить срок</button>
+  </div>
+  <div class="card-body" id="deadlines-list">
+    <div class="text-muted text-small" id="deadlines-loading">Загрузка…</div>
+  </div>
+</div>
+
+<!-- Add deadline modal -->
+<div id="deadline-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:300;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:12px;padding:28px;max-width:520px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:var(--shadow-md)">
+    <h2 style="font-size:16px;font-weight:700;margin-bottom:16px">+ Добавить процессуальный срок</h2>
+    <div class="form-group">
+      <label class="form-label">Тип срока (по закону)</label>
+      <select id="modal-rule-key" class="form-control" onchange="onRuleChange()">
+        <option value="">— выбрать правило —</option>
+      </select>
+    </div>
+    <div id="modal-statute-hint" class="deadline-item urgency-safe mb-2" style="display:none;font-size:12px"></div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Дата-триггер</label>
+        <input type="date" id="modal-trigger-date" class="form-control" oninput="onRuleChange()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Расчётная дата (авто)</label>
+        <input type="date" id="modal-calc-date" class="form-control"
+               placeholder="заполняется автоматически" style="background:#F7FAFC">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Переопределить дату вручную</label>
+      <input type="date" id="modal-manual-date" class="form-control">
+      <div class="text-small text-muted mt-1">Если заполнено — использует эту дату вместо расчётной.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Собственное название (если не выбрано правило)</label>
+      <input type="text" id="modal-custom-name" class="form-control" placeholder="Срок подачи отзыва…">
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-primary" onclick="submitDeadline({{ case['id'] }})">Сохранить</button>
+      <button class="btn btn-secondary" onclick="closeDeadlineModal()">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Notes & Tasks ===== -->
+<div class="card mb-3">
+  <div class="card-header" style="flex-wrap:wrap;gap:8px">
+    <h2>📝 Заметки и задачи</h2>
+    <div class="note-filter-bar">
+      <button class="btn btn-primary btn-sm" id="note-filter-all"
+              onclick="Notes.setFilter('all')">Все</button>
+      <button class="btn btn-secondary btn-sm" id="note-filter-note"
+              onclick="Notes.setFilter('note')">Заметки</button>
+      <button class="btn btn-secondary btn-sm" id="note-filter-task"
+              onclick="Notes.setFilter('task')">Задачи</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-left:auto">
+      <button class="btn btn-primary btn-sm" onclick="Notes.createNote('note')">+ Заметка</button>
+      <button class="btn btn-primary btn-sm" onclick="Notes.createNote('task')">+ Задача</button>
+    </div>
+  </div>
+  <div class="card-body">
+    <div id="notes-container">
+      <div class="text-muted text-small">Загрузка…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Documents ===== -->
+<div class="card mb-3">
+  <div class="card-header">
+    <h2>📎 Документы</h2>
+    <label class="btn btn-primary btn-sm upload-label">
+      + Загрузить
+      <input type="file" id="case-file-input" style="display:none" multiple
+             accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.rtf,.jpg,.jpeg,.png,.gif,.zip,.rar,.odt"
+             onchange="uploadCaseFiles(this)">
+    </label>
+  </div>
+  <div class="card-body">
+    <div id="attachments-container">
+      <div class="text-muted text-small">Загрузка…</div>
+    </div>
+
+    <!-- Templates subsection -->
+    <div id="templates-section"
+         style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+      <h3 style="font-size:13px;font-weight:700;color:var(--text-muted);margin-bottom:8px">
+        📄 Шаблоны документов
+      </h3>
+      <div id="templates-container">
+        <div class="text-muted text-small">Загрузка…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  /* ── Client ── */
+  function setClient(caseId, clientId) {
+    fetch('/api/cases/' + caseId + '/set-client', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: clientId || null})
+    }).then(r => r.json()).then(d => {
+      var ind = document.getElementById('client-save-indicator');
+      if (d.success && ind) { ind.classList.add('show'); setTimeout(() => ind.classList.remove('show'), 2000); }
+    });
+  }
+
+  /* ── SOY URLs inline edit ── */
+  function toggleSoyEdit(field, caseId) {
+    var inp = document.getElementById('input-' + field);
+    var lnk = document.getElementById('link-' + field);
+    if (inp.style.display === 'none') {
+      inp.style.display = 'inline-block';
+      lnk.style.display = 'none';
+      inp.focus();
+    } else {
+      inp.style.display = 'none';
+      lnk.style.display = '';
+    }
+  }
+
+  function saveSoyUrl(field, caseId, inp) {
+    var val = inp.value.trim();
+    fetch('/api/autosave', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({table: 'cases', id: caseId, field: field, value: val})
+    }).then(r => r.json()).then(d => {
+      if (d.success) {
+        var lnk = document.getElementById('link-' + field);
+        if (val) {
+          lnk.href = val;
+          lnk.style.opacity = '1';
+          lnk.style.cursor = 'pointer';
+        }
+        inp.style.display = 'none';
+        lnk.style.display = '';
+      }
+    });
+  }
+
+  /* ── Deadlines ── */
+  var _deadlineRules = {};
+
+  function urgencyClass(dateStr) {
+    if (!dateStr) return 'urgency-safe';
+    var d = new Date(dateStr), today = new Date();
+    today.setHours(0,0,0,0);
+    var days = Math.round((d - today) / 86400000);
+    if (days <= 1) return 'urgency-crit';
+    if (days <= 3) return 'urgency-soon';
+    if (days <= 7) return 'urgency-warn';
+    return 'urgency-safe';
+  }
+
+  function loadDeadlines(caseId) {
+    fetch('/api/cases/' + caseId + '/deadlines')
+      .then(r => r.json())
+      .then(items => {
+        var el = document.getElementById('deadlines-list');
+        if (!items.length) {
+          el.innerHTML = '<div class="empty-state"><span class="empty-icon">✅</span>Нет процессуальных сроков</div>';
+          return;
+        }
+        el.innerHTML = items.map(d => renderDeadline(d)).join('');
+      });
+  }
+
+  function renderDeadline(d) {
+    var cls = urgencyClass(d.deadline_date);
+    var doneClass = d.is_done ? 'opacity:.4;' : '';
+    var manualBadge = d.is_manual_override
+      ? '<span class="badge-pill badge-warning" style="font-size:10px">изменено вручную</span>' : '';
+    var doneBadge = d.is_done
+      ? '<span class="badge-pill badge-active" style="font-size:10px">✓ выполнено</span>' : '';
+    return `
+      <div class="deadline-item ${cls}" id="dl-${d.id}" style="${doneClass}">
+        <div class="flex items-center gap-2" style="flex-wrap:wrap">
+          <strong style="flex:1">${escHtml(d.deadline_type || 'Срок')}</strong>
+          <input type="date" value="${d.deadline_date || ''}"
+                 style="font-size:12px;border:1px solid var(--border);border-radius:4px;padding:2px 6px"
+                 onchange="updateDeadlineDate(${d.id}, this.value)"
+                 ${d.is_done ? 'disabled' : ''}>
+          ${manualBadge}${doneBadge}
+          <button onclick="toggleDone(${d.id})"
+                  class="btn btn-secondary btn-sm" title="${d.is_done ? 'Отметить как невыполнено' : 'Отметить выполненным'}">
+            ${d.is_done ? '↩' : '✓'}
+          </button>
+          <button onclick="removeDeadline(${d.id})"
+                  class="btn btn-danger btn-sm btn-icon" title="Удалить">✕</button>
+        </div>
+        ${d.statute_article ? `<div class="dl-meta" style="margin-top:4px">
+          <span class="statute-badge" title="${escHtml(d.calculation_note || '')}">${escHtml(d.statute_article)}</span>
+          ${d.deadline_date ? '<span style="margin-left:8px">→ ' + d.deadline_date + '</span>' : ''}
+        </div>` : ''}
+      </div>`;
+  }
+
+  function escHtml(s) {
+    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function updateDeadlineDate(id, val) {
+    fetch('/api/deadlines/' + id, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({deadline_date: val})
+    }).then(r => r.json()).then(() => loadDeadlines({{ case['id'] }}));
+  }
+
+  function toggleDone(id) {
+    fetch('/api/deadlines/' + id + '/done', {method:'PATCH'})
+      .then(r => r.json()).then(() => loadDeadlines({{ case['id'] }}));
+  }
+
+  function removeDeadline(id) {
+    if (!confirm('Удалить срок?')) return;
+    fetch('/api/deadlines/' + id, {method:'DELETE'})
+      .then(r => r.json()).then(() => loadDeadlines({{ case['id'] }}));
+  }
+
+  /* ── Add deadline modal ── */
+  function openAddDeadlineModal() {
+    document.getElementById('deadline-modal').style.display = 'flex';
+    if (!Object.keys(_deadlineRules).length) {
+      fetch('/api/deadline-rules').then(r => r.json()).then(rules => {
+        _deadlineRules = rules;
+        var sel = document.getElementById('modal-rule-key');
+        sel.innerHTML = '<option value="">— выбрать правило —</option>';
+        Object.entries(rules).forEach(([k,v]) => {
+          sel.innerHTML += `<option value="${k}">${escHtml(v.name)}</option>`;
+        });
+      });
+    }
+  }
+
+  function closeDeadlineModal() {
+    document.getElementById('deadline-modal').style.display = 'none';
+  }
+
+  function onRuleChange() {
+    var rk = document.getElementById('modal-rule-key').value;
+    var td = document.getElementById('modal-trigger-date').value;
+    var hint = document.getElementById('modal-statute-hint');
+    if (rk && _deadlineRules[rk]) {
+      var rule = _deadlineRules[rk];
+      hint.style.display = 'block';
+      hint.innerHTML = `<strong>${escHtml(rule.statute_article)}</strong> — ${escHtml(rule.calculation_note)}`;
+    } else {
+      hint.style.display = 'none';
+    }
+    // Auto-calculate
+    if (rk && td) {
+      fetch('/api/cases/{{ case['id'] }}/deadlines', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({rule_key: rk, trigger_date: td, _preview: true})
+      }).then(r => r.json()).then(d => {
+        if (d.deadline_date)
+          document.getElementById('modal-calc-date').value = d.deadline_date;
+      }).catch(() => {});
+    }
+  }
+
+  function submitDeadline(caseId) {
+    var rk    = document.getElementById('modal-rule-key').value;
+    var td    = document.getElementById('modal-trigger-date').value;
+    var calc  = document.getElementById('modal-calc-date').value;
+    var manual= document.getElementById('modal-manual-date').value;
+    var name  = document.getElementById('modal-custom-name').value.trim();
+    var finalDate = manual || calc;
+    if (!finalDate) { alert('Укажите дату'); return; }
+    var payload = {deadline_date: finalDate};
+    if (rk) { payload.rule_key = rk; payload.trigger_date = td; }
+    else     { payload.deadline_type = name || 'Срок'; }
+    fetch('/api/cases/' + caseId + '/deadlines', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    }).then(r => r.json()).then(d => {
+      if (d.success || d.id) {
+        closeDeadlineModal();
+        loadDeadlines(caseId);
+      }
+    });
+  }
+
+  // Close modal on backdrop click
+  document.getElementById('deadline-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeDeadlineModal();
+  });
+
+  // Boot
+  document.addEventListener('DOMContentLoaded', function() {
+    loadDeadlines({{ case['id'] }});
+    Notes.init({{ case['id'] }});
+    loadAttachments({{ case['id'] }});
+    loadTemplates();
+  });
+</script>
+
+<script src="{{ url_for('static', filename='notes.js') }}"></script>
+<script>
+  /* ── Attachments ── */
+  var _CASE_ID_ATT = {{ case['id'] }};
+
+  function _attIcon(filename) {
+    var ext = (filename || '').split('.').pop().toLowerCase();
+    var map = {pdf:'📄', doc:'📝', docx:'📝', xls:'📊', xlsx:'📊', txt:'📃',
+               jpg:'🖼', jpeg:'🖼', png:'🖼', gif:'🖼', bmp:'🖼',
+               zip:'🗜', rar:'🗜', '7z':'🗜', rtf:'📝', odt:'📝', ods:'📊'};
+    return map[ext] || '📎';
+  }
+
+  function _fmtBytes(b) {
+    if (!b) return '';
+    if (b < 1024) return b + ' Б';
+    if (b < 1048576) return Math.round(b/1024) + ' КБ';
+    return (b/1048576).toFixed(1) + ' МБ';
+  }
+
+  window.loadAttachments = function(caseId) {
+    fetch('/api/cases/' + caseId + '/attachments')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var container = document.getElementById('attachments-container');
+        if (!container) return;
+        if (!data.length) {
+          container.innerHTML = '<div class="empty-state" style="padding:20px"><span class="empty-icon">📂</span>Нет прикреплённых файлов</div>';
+          return;
+        }
+        var caseLvl  = data.filter(function(a) { return !a.note_id; });
+        var noteLvl  = data.filter(function(a) { return !!a.note_id; });
+        var html = '';
+
+        function renderGroup(items, label) {
+          if (!items.length) return '';
+          return '<div class="attachment-group-label">' + label + '</div>' +
+            '<div class="attachment-list">' +
+            items.map(function(a) {
+              return '<div class="attachment-item">' +
+                '<span class="attachment-icon">' + _attIcon(a.filename) + '</span>' +
+                '<span class="attachment-name" title="' + escHtml(a.filename) + '">' + escHtml(a.filename) + '</span>' +
+                '<span class="attachment-meta">' + _fmtBytes(a.file_size) +
+                  (a.created_at ? ' · ' + a.created_at.slice(0,10) : '') +
+                  (a.note_title ? ' · заметка: ' + escHtml(a.note_title||'') : '') +
+                '</span>' +
+                '<a href="/api/cases/' + caseId + '/attachments/' + a.id + '/download"' +
+                  ' class="btn btn-secondary btn-sm" download>⬇</a>' +
+                '<button class="btn btn-danger btn-sm btn-icon"' +
+                  ' onclick="deleteAttachment(' + a.id + ')" title="Удалить">✕</button>' +
+              '</div>';
+            }).join('') + '</div>';
+        }
+
+        html += renderGroup(caseLvl, 'Файлы к делу');
+        html += renderGroup(noteLvl, 'Файлы к заметкам');
+        container.innerHTML = html;
+      });
+  };
+
+  function uploadCaseFiles(input) {
+    Array.from(input.files).forEach(function(file) {
+      var fd = new FormData();
+      fd.append('file', file);
+      fetch('/api/cases/' + _CASE_ID_ATT + '/attachments', { method: 'POST', body: fd })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.error) { alert('Ошибка: ' + data.error); return; }
+          loadAttachments(_CASE_ID_ATT);
+        });
+    });
+    input.value = '';
+  }
+
+  function deleteAttachment(attId) {
+    if (!confirm('Удалить файл?')) return;
+    fetch('/api/attachments/' + attId, { method: 'DELETE' })
+      .then(function() { loadAttachments(_CASE_ID_ATT); });
+  }
+
+  /* ── Templates ── */
+  function loadTemplates() {
+    fetch('/templates')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var container = document.getElementById('templates-container');
+        if (!container) return;
+        if (!data.length) {
+          container.innerHTML = '<div class="text-muted text-small">' +
+            'Шаблоны не найдены. Разместите .docx-файлы в папке <code>data/templates/</code>.</div>';
+          return;
+        }
+        container.innerHTML = '<div class="template-list">' +
+          data.map(function(t) {
+            return '<div class="template-item">' +
+              '<span style="font-size:20px">📋</span>' +
+              '<span class="template-name">' + escHtml(t.filename) + '</span>' +
+              '<button class="btn btn-primary btn-sm"' +
+              ' onclick="generateTemplate(\'' + escHtml(t.filename) + '\')">Сформировать</button>' +
+            '</div>';
+          }).join('') + '</div>';
+      });
+  }
+
+  function generateTemplate(filename) {
+    var btn = event.target;
+    btn.textContent = 'Формирование…';
+    btn.disabled = true;
+    fetch('/templates/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template_filename: filename, case_id: _CASE_ID_ATT })
+    })
+    .then(function(r) {
+      if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || 'error'); });
+      return r.blob();
+    })
+    .then(function(blob) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function() { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    })
+    .catch(function(err) { alert('Ошибка: ' + err.message); })
+    .finally(function() { btn.textContent = 'Сформировать'; btn.disabled = false; });
+  }
+</script>
+
+<style>
+  .statute-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #EBF8FF;
+    color: var(--primary);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: help;
+    border: 1px solid #BEE3F8;
+  }
+</style>
+<script>
+// ── Participant inline edit + freeze/unfreeze ─────────────────────────────
+function editPartField(partId, field, spanEl) {
+  var current = spanEl.textContent.trim();
+  if (current === '—') current = '';
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.value = current;
+  input.className = 'form-control';
+  input.style.cssText = 'display:inline-block;width:160px;padding:2px 6px;font-size:13px';
+  spanEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  function save() {
+    var val = input.value.trim();
+    fetch('/api/participants/' + partId, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({field: field, value: val})
+    })
+    .then(r => r.json())
+    .then(function(d) {
+      var span = document.createElement('span');
+      span.className = 'part-field';
+      span.id = 'p' + field + '-' + partId;
+      span.textContent = val || '—';
+      span.onclick = function() { editPartField(partId, field, span); };
+      input.replaceWith(span);
+      // Update lock icon
+      var row = document.getElementById('prow-' + partId);
+      if (row) {
+        var icons = row.querySelectorAll('.lock-icon[data-field=' + field + '], .auto-icon[data-field=' + field + ']');
+        icons.forEach(function(ic) { ic.remove(); });
+        var lock = document.createElement('span');
+        lock.className = 'lock-icon';
+        lock.setAttribute('data-field', field);
+        lock.title = 'Введено вручную — парсер не перезапишет';
+        lock.textContent = '🔒';
+        lock.onclick = function() { unfreezeField(partId, field); };
+        span.insertAdjacentElement('afterend', lock);
+      }
+    })
+    .catch(function() { input.replaceWith(spanEl); });
+  }
+
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.replaceWith(spanEl); }
+  });
+}
+
+function unfreezeField(partId, field) {
+  if (!confirm('Разрешить парсеру обновлять это поле автоматически?')) return;
+  fetch('/api/participants/' + partId + '/unfreeze', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({field: field})
+  })
+  .then(r => r.json())
+  .then(function(d) {
+    if (d.success) location.reload();
+  });
+}
+
+function syncSoyNow(caseId) {
+  var btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ Синхронизация…';
+  fetch('/api/cases/' + caseId + '/soy-sync', {method: 'POST'})
+    .then(r => r.json())
+    .then(function(d) {
+      btn.disabled = false;
+      btn.textContent = '🔄 Обновить сейчас';
+      alert(d.success
+        ? '✓ Обновлено. Событий: ' + (d.events_count || 0)
+        : '✗ ' + (d.message || 'Ошибка'));
+      if (d.success) location.reload();
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.textContent = '🔄 Обновить сейчас';
+      alert('Ошибка соединения');
+    });
+}
+function toggleSoySync(caseId, enabled) {
+  fetch('/api/cases/' + caseId + '/soy-scraping', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: enabled})
+  });
+}
+</script>
+{% endblock %}

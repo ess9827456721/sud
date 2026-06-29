@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}Календарь{% endblock %}
+{% block page_title %}Календарь{% endblock %}
+
+{% block content %}
+
+<div class="cal-layout">
+
+  <!-- ===== Main calendar ===== -->
+  <div class="cal-main">
+
+    <!-- Navigation -->
+    <div class="cal-nav">
+      <button class="btn btn-secondary btn-sm" id="cal-prev">← Назад</button>
+      <h2 class="cal-title" id="cal-title">…</h2>
+      <button class="btn btn-secondary btn-sm" id="cal-next">Вперёд →</button>
+    </div>
+
+    <!-- Grid header -->
+    <div class="cal-grid-head">
+      <div>Пн</div><div>Вт</div><div>Ср</div><div>Чт</div><div>Пт</div>
+      <div>Сб</div><div>Вс</div>
+    </div>
+
+    <!-- Day cells -->
+    <div class="cal-grid" id="cal-grid">
+      <div class="empty-state" style="grid-column:1/-1">Загрузка…</div>
+    </div>
+
+  </div>
+
+  <!-- ===== Sidebar: upcoming 14 days ===== -->
+  <div class="cal-sidebar">
+    <div class="card">
+      <div class="card-header"><h2>📅 Ближайшие 14 дней</h2></div>
+      <div class="card-body" id="cal-upcoming">
+        <div class="empty-state">Загрузка…</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  var today = new Date();
+  var curYear  = today.getFullYear();
+  var curMonth = today.getMonth() + 1; // 1-based
+
+  var RU_MONTHS = ['','Январь','Февраль','Март','Апрель','Май','Июнь',
+                   'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+  var EVENT_COLORS = {
+    hearing:  'cal-ev-hearing',
+    decision: 'cal-ev-decision',
+    document: 'cal-ev-doc',
+    deadline: 'cal-ev-deadline',
+  };
+
+  function evClass(type) {
+    return EVENT_COLORS[type] || 'cal-ev-doc';
+  }
+
+  function todayStr() {
+    return today.getFullYear() + '-'
+      + String(today.getMonth()+1).padStart(2,'0') + '-'
+      + String(today.getDate()).padStart(2,'0');
+  }
+
+  function load(year, month) {
+    document.getElementById('cal-title').textContent = RU_MONTHS[month] + ' ' + year;
+    var grid = document.getElementById('cal-grid');
+    grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">Загрузка…</div>';
+
+    fetch('/api/calendar?year=' + year + '&month=' + month)
+      .then(r => r.json())
+      .then(function(data) {
+        renderGrid(data, year, month);
+        renderUpcoming(data);
+      })
+      .catch(function(e) {
+        grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">Ошибка: ' + e.message + '</div>';
+      });
+  }
+
+  function renderGrid(data, year, month) {
+    var grid = document.getElementById('cal-grid');
+    var days  = data.days || {};
+
+    // Determine first day of month (Mon=0 … Sun=6)
+    var firstDate = new Date(year, month - 1, 1);
+    var startDow  = (firstDate.getDay() + 6) % 7; // Mon-first
+
+    // Last day
+    var lastDate = new Date(year, month, 0);
+    var totalDays = lastDate.getDate();
+
+    var cells = [];
+
+    // Empty leading cells
+    for (var i = 0; i < startDow; i++) {
+      cells.push('<div class="cal-cell cal-cell-empty"></div>');
+    }
+
+    var td = todayStr();
+
+    for (var d = 1; d <= totalDays; d++) {
+      var dateStr = year + '-'
+        + String(month).padStart(2,'0') + '-'
+        + String(d).padStart(2,'0');
+      var evts = days[dateStr] || [];
+      var isToday = (dateStr === td) ? ' cal-today' : '';
+      var isPast  = (dateStr < td)   ? ' cal-past'  : '';
+
+      var pills = '';
+      var shown = evts.slice(0, 3);
+      var overflow = evts.length - shown.length;
+      shown.forEach(function(ev) {
+        var cls = evClass(ev.event_type || ev.type);
+        var title = (ev.description || ev.deadline_type || ev.event_type || '').slice(0, 30);
+        var caseId = ev.case_id;
+        var link = caseId ? ' onclick="location.href=\'/case/\' + ' + caseId + '"' : '';
+        pills += '<div class="cal-pill ' + cls + '"' + link + ' title="' + title + '">'
+          + (ev.case_number ? ev.case_number.slice(0,12) + ' · ' : '')
+          + (title.slice(0, 18) || ev.event_type || '')
+          + '</div>';
+      });
+      if (overflow > 0) {
+        pills += '<div class="cal-pill cal-ev-more">+' + overflow + '</div>';
+      }
+
+      cells.push('<div class="cal-cell' + isToday + isPast + '">'
+        + '<div class="cal-day-num">' + d + '</div>'
+        + pills
+        + '</div>');
+    }
+
+    // Trailing empty cells to fill last row
+    var total = startDow + totalDays;
+    var trailing = (7 - (total % 7)) % 7;
+    for (var t = 0; t < trailing; t++) {
+      cells.push('<div class="cal-cell cal-cell-empty"></div>');
+    }
+
+    grid.innerHTML = cells.join('');
+
+    // Wire up pill clicks using event delegation
+    grid.addEventListener('click', function(e) {
+      var pill = e.target.closest('.cal-pill[onclick]');
+      if (pill) { eval(pill.getAttribute('onclick')); }
+    });
+  }
+
+  function renderUpcoming(data) {
+    var days = data.days || {};
+    var td   = todayStr();
+    var cutoff = new Date(today);
+    cutoff.setDate(cutoff.getDate() + 14);
+    var cutStr = cutoff.getFullYear() + '-'
+      + String(cutoff.getMonth()+1).padStart(2,'0') + '-'
+      + String(cutoff.getDate()).padStart(2,'0');
+
+    var eventsInRange = [];
+    Object.keys(days).sort().forEach(function(dateStr) {
+      if (dateStr >= td && dateStr <= cutStr) {
+        days[dateStr].forEach(function(ev) {
+          eventsInRange.push(Object.assign({date: dateStr}, ev));
+        });
+      }
+    });
+
+    var container = document.getElementById('cal-upcoming');
+    if (eventsInRange.length === 0) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-icon">✅</span>Нет событий на 14 дней</div>';
+      return;
+    }
+
+    container.innerHTML = eventsInRange.map(function(ev) {
+      var cls = evClass(ev.event_type || ev.type);
+      var href = ev.case_id ? '/case/' + ev.case_id : '#';
+      return '<div class="cal-upcoming-item">'
+        + '<span class="cal-pill ' + cls + '" style="min-width:10px">&nbsp;</span>'
+        + '<div class="cal-upcoming-meta">'
+        + '<div class="cal-upcoming-date">' + ev.date + '</div>'
+        + '<div class="cal-upcoming-title">'
+        + (ev.case_number ? '<a href="' + href + '">' + ev.case_number + '</a> — ' : '')
+        + (ev.description || ev.deadline_type || ev.event_type || '')
+        + '</div>'
+        + '</div>'
+        + '</div>';
+    }).join('');
+  }
+
+  document.getElementById('cal-prev').addEventListener('click', function() {
+    curMonth--;
+    if (curMonth < 1) { curMonth = 12; curYear--; }
+    load(curYear, curMonth);
+  });
+  document.getElementById('cal-next').addEventListener('click', function() {
+    curMonth++;
+    if (curMonth > 12) { curMonth = 1; curYear++; }
+    load(curYear, curMonth);
+  });
+
+  load(curYear, curMonth);
+})();
+</script>
+{% endblock %}

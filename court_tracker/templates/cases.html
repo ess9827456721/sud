@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Дела{% endblock %}
+{% block page_title %}Все дела{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('export_cases_xlsx') }}" class="btn btn-secondary btn-sm">📥 Скачать Excel</a>
+  <a href="{{ url_for('case_add') }}" class="btn btn-primary btn-sm">+ Добавить дело</a>
+{% endblock %}
+
+{% block content %}
+
+<!-- Filters -->
+<form method="get" action="{{ url_for('cases_list') }}">
+  <div class="filters-bar">
+    <div class="form-group">
+      <label class="form-label">Источник</label>
+      <select name="source" class="form-control" onchange="this.form.submit()">
+        <option value="">Все</option>
+        <option value="kad" {{ 'selected' if filters.get('source') == 'kad' }}>КАД (АС)</option>
+        <option value="soy" {{ 'selected' if filters.get('source') == 'soy' }}>СОЮ</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Статус</label>
+      <select name="status" class="form-control" onchange="this.form.submit()">
+        <option value="">Все</option>
+        {% for s in statuses %}
+          <option value="{{ s[0] }}" {{ 'selected' if filters.get('status') == s[0] }}>{{ s[0] }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Клиент</label>
+      <select name="client_id" class="form-control" onchange="this.form.submit()">
+        <option value="">Все</option>
+        {% for c in clients %}
+          <option value="{{ c[0] }}" {{ 'selected' if filters.get('client_id') == c[0]|string }}>{{ c[1] }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% if filters %}
+      <a href="{{ url_for('cases_list') }}" class="btn btn-secondary btn-sm">✕ Сбросить</a>
+    {% endif %}
+  </div>
+</form>
+
+<!-- Table -->
+<div class="card">
+  <div class="card-header">
+    <h2>Всего: {{ cases|length }} дел(а)</h2>
+  </div>
+  <div class="table-container">
+    {% if cases %}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Номер дела</th>
+            <th>Суд</th>
+            <th>Судья</th>
+            <th>Статус</th>
+            <th>Источник</th>
+            <th>Клиент</th>
+            <th>Обновлено</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in cases %}
+            <tr onclick="window.location='{{ url_for('case_detail', case_id=c['id']) }}'">
+              <td class="text-muted">{{ c['id'] }}</td>
+              <td><strong>{{ c['case_number'] }}</strong></td>
+              <td>{{ c['court'] or '—' }}</td>
+              <td>{{ c['judge'] or '—' }}</td>
+              <td>
+                {% if c['status'] %}
+                  <span class="badge-pill badge-active">{{ c['status'] }}</span>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+              <td>
+                <span class="badge-pill badge-{{ c['source'] }}">{{ c['source'].upper() }}</span>
+              </td>
+              <td>{{ c['client_name'] or '—' }}</td>
+              <td class="text-muted text-small">{{ (c['updated_at'] or '')[:16] }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">
+        <span class="empty-icon">📂</span>
+        Дела не найдены.
+        <a href="{{ url_for('case_add') }}">Добавить первое дело</a>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

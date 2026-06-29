@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+{% block title %}Аналитика{% endblock %}
+{% block page_title %}Аналитика{% endblock %}
+
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+
+<!-- Tab nav -->
+<div class="tab-nav">
+  <button class="tab-btn active" data-tab="cases">⚖ Дела</button>
+  <button class="tab-btn" data-tab="judges">👨‍⚖️ Судьи</button>
+  <button class="tab-btn" data-tab="finance">💰 Финансы</button>
+</div>
+
+<!-- ===== TAB: ДЕЛА ===== -->
+<div class="tab-panel active" id="tab-cases">
+
+  <div id="cases-loading" class="empty-state">Загрузка…</div>
+  <div id="cases-content" style="display:none">
+
+    <!-- Metric cards -->
+    <div class="metrics-grid" id="cases-metrics"></div>
+
+    <!-- Charts row -->
+    <div class="analytics-charts">
+      <div class="card">
+        <div class="card-header"><h2>📈 Дела по месяцам</h2></div>
+        <div class="card-body">
+          <canvas id="chartByMonth" height="220"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>🥧 По типам дел</h2></div>
+        <div class="card-body chart-pie-wrap">
+          <canvas id="chartByType" height="220"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Courts table -->
+    <div class="card mt-3">
+      <div class="card-header"><h2>🏛 По судам</h2></div>
+      <div class="card-body">
+        <table class="data-table" id="courts-table">
+          <thead>
+            <tr>
+              <th>Суд</th>
+              <th class="num">Всего дел</th>
+              <th class="num">% побед</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ===== TAB: СУДЬИ ===== -->
+<div class="tab-panel" id="tab-judges">
+
+  <div id="judges-loading" class="empty-state">Загрузка…</div>
+  <div id="judges-content" style="display:none">
+    <div class="card">
+      <div class="card-header">
+        <h2>👨‍⚖️ Статистика по судьям</h2>
+        <span class="text-muted" style="font-size:13px">Только судьи с ≥ 2 делами</span>
+      </div>
+      <div class="card-body">
+        <table class="data-table" id="judges-table">
+          <thead>
+            <tr>
+              <th>Судья</th>
+              <th>Суд</th>
+              <th class="num">Всего</th>
+              <th class="num">Выиграно</th>
+              <th class="num">Проиграно</th>
+              <th class="num">% побед</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="judges-empty" class="empty-state" style="display:none">
+          <span class="empty-icon">📭</span>
+          Недостаточно данных по судьям
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TAB: ФИНАНСЫ ===== -->
+<div class="tab-panel" id="tab-finance">
+
+  <div id="finance-loading" class="empty-state">Загрузка…</div>
+  <div id="finance-content" style="display:none">
+
+    <div class="metrics-grid" id="finance-metrics"></div>
+
+    <div class="card mt-3">
+      <div class="card-header"><h2>👥 По клиентам</h2></div>
+      <div class="card-body">
+        <table class="data-table" id="finance-table">
+          <thead>
+            <tr>
+              <th>Клиент</th>
+              <th class="num">Гонорар (план)</th>
+              <th class="num">Оплачено</th>
+              <th class="num">Дебиторка</th>
+              <th class="num">Сумма исков</th>
+              <th class="num">Взыскано</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="finance-empty" class="empty-state" style="display:none">
+          <span class="empty-icon">📭</span>
+          Нет финансовых данных
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  // Tab switching
+  document.querySelectorAll('.tab-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+
+  function fmt(v) {
+    if (v == null) return '—';
+    return Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 0}) + ' ₽';
+  }
+  function pct(v) {
+    if (v == null) return '—';
+    return Number(v).toFixed(1) + '%';
+  }
+  function winClass(rate) {
+    if (rate >= 70) return 'win-high';
+    if (rate >= 40) return 'win-mid';
+    return 'win-low';
+  }
+
+  var chartByMonth = null;
+  var chartByType  = null;
+
+  // ---- CASES ----
+  fetch('/api/analytics/cases')
+    .then(r => r.json())
+    .then(function(d) {
+      document.getElementById('cases-loading').style.display = 'none';
+      document.getElementById('cases-content').style.display = '';
+
+      // Metric cards
+      var mc = document.getElementById('cases-metrics');
+      mc.innerHTML = [
+        {label:'Всего дел',      value: d.total_cases,    cls:''},
+        {label:'Активных',       value: d.active_cases,   cls:'green'},
+        {label:'Выиграно',       value: d.won,            cls:'green'},
+        {label:'Проиграно',      value: d.lost,           cls:'orange'},
+        {label:'% побед',        value: pct(d.win_rate_pct).replace(' ₽',''), cls:'blue'},
+        {label:'Ср. длительность', value: (d.avg_duration_days ? Math.round(d.avg_duration_days)+' дн.' : '—'), cls:''},
+      ].map(function(m) {
+        return '<div class="metric-card ' + m.cls + '">'
+          + '<div class="metric-value">' + m.value + '</div>'
+          + '<div class="metric-label">' + m.label + '</div>'
+          + '</div>';
+      }).join('');
+
+      // Bar chart — by month
+      var months = d.by_month || [];
+      if (chartByMonth) chartByMonth.destroy();
+      chartByMonth = new Chart(document.getElementById('chartByMonth'), {
+        type: 'bar',
+        data: {
+          labels: months.map(m => m.month),
+          datasets: [{
+            label: 'Добавлено',
+            data: months.map(m => m.count),
+            backgroundColor: 'rgba(66, 153, 225, 0.7)',
+            borderColor: 'rgba(66, 153, 225, 1)',
+            borderWidth: 1,
+            borderRadius: 4,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { beginAtZero: true, ticks: { stepSize: 1 } }
+          }
+        }
+      });
+
+      // Pie chart — by type
+      var byType = d.by_type || {};
+      var typeLabels = Object.keys(byType);
+      var typeValues = Object.values(byType);
+      var palette = ['#4299E1','#48BB78','#ED8936','#9F7AEA','#FC8181','#F6E05E','#81E6D9','#FBB6CE'];
+      if (chartByType) chartByType.destroy();
+      if (typeLabels.length > 0) {
+        chartByType = new Chart(document.getElementById('chartByType'), {
+          type: 'doughnut',
+          data: {
+            labels: typeLabels,
+            datasets: [{
+              data: typeValues,
+              backgroundColor: palette.slice(0, typeLabels.length),
+              borderWidth: 2,
+            }]
+          },
+          options: {
+            responsive: true,
+            plugins: { legend: { position: 'bottom', labels: { font: { size: 12 } } } }
+          }
+        });
+      } else {
+        document.getElementById('chartByType').parentElement.innerHTML =
+          '<div class="empty-state"><span class="empty-icon">📭</span>Нет данных</div>';
+      }
+
+      // Courts table
+      var tbody = document.querySelector('#courts-table tbody');
+      var courts = d.by_court || {};
+      var rows = Object.entries(courts).sort((a,b) => b[1].total - a[1].total);
+      if (rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Нет данных</td></tr>';
+      } else {
+        tbody.innerHTML = rows.map(function(e) {
+          var court = e[0], st = e[1];
+          var rate = (st.won + st.lost > 0) ? (st.won / (st.won + st.lost) * 100) : null;
+          return '<tr>'
+            + '<td>' + (court || '—') + '</td>'
+            + '<td class="num">' + st.total + '</td>'
+            + '<td class="num"><span class="win-badge ' + (rate != null ? winClass(rate) : '') + '">'
+            + (rate != null ? pct(rate) : '—') + '</span></td>'
+            + '</tr>';
+        }).join('');
+      }
+    })
+    .catch(function(e) {
+      document.getElementById('cases-loading').textContent = 'Ошибка загрузки: ' + e.message;
+    });
+
+  // ---- JUDGES ----
+  fetch('/api/analytics/judges')
+    .then(r => r.json())
+    .then(function(data) {
+      document.getElementById('judges-loading').style.display = 'none';
+      document.getElementById('judges-content').style.display = '';
+      var tbody = document.querySelector('#judges-table tbody');
+      if (!data || data.length === 0) {
+        document.getElementById('judges-table').style.display = 'none';
+        document.getElementById('judges-empty').style.display = '';
+        return;
+      }
+      tbody.innerHTML = data.map(function(j) {
+        var rate = j.win_rate_pct;
+        return '<tr>'
+          + '<td>' + (j.judge || '—') + '</td>'
+          + '<td>' + (j.court || '—') + '</td>'
+          + '<td class="num">' + j.total_cases + '</td>'
+          + '<td class="num">' + j.won + '</td>'
+          + '<td class="num">' + j.lost + '</td>'
+          + '<td class="num"><span class="win-badge ' + winClass(rate) + '">' + pct(rate) + '</span></td>'
+          + '</tr>';
+      }).join('');
+    })
+    .catch(function(e) {
+      document.getElementById('judges-loading').textContent = 'Ошибка загрузки: ' + e.message;
+    });
+
+  // ---- FINANCE ----
+  fetch('/api/analytics/finance')
+    .then(r => r.json())
+    .then(function(d) {
+      document.getElementById('finance-loading').style.display = 'none';
+      document.getElementById('finance-content').style.display = '';
+
+      var mc = document.getElementById('finance-metrics');
+      mc.innerHTML = [
+        {label:'Сумма исков',     value: fmt(d.total_claim_amount),  cls:'blue'},
+        {label:'Взыскано',        value: fmt(d.total_awarded),        cls:'green'},
+        {label:'Госпошлина',      value: fmt(d.total_state_duty),     cls:''},
+        {label:'Гонорар (план)',  value: fmt(d.total_fee_billed),     cls:''},
+        {label:'Оплачено',        value: fmt(d.total_fee_paid),       cls:'green'},
+        {label:'Дебиторка',       value: fmt(d.fee_receivable),       cls: d.fee_receivable > 0 ? 'orange' : 'green'},
+      ].map(function(m) {
+        return '<div class="metric-card ' + m.cls + '">'
+          + '<div class="metric-value" style="font-size:18px">' + m.value + '</div>'
+          + '<div class="metric-label">' + m.label + '</div>'
+          + '</div>';
+      }).join('');
+
+      var tbody = document.querySelector('#finance-table tbody');
+      var clients = d.by_client || [];
+      if (clients.length === 0) {
+        document.getElementById('finance-table').style.display = 'none';
+        document.getElementById('finance-empty').style.display = '';
+        return;
+      }
+      tbody.innerHTML = clients.map(function(c) {
+        var deb = (c.fee_total || 0) - (c.fee_paid || 0);
+        return '<tr>'
+          + '<td>' + (c.client_name || '—') + '</td>'
+          + '<td class="num">' + fmt(c.fee_total) + '</td>'
+          + '<td class="num">' + fmt(c.fee_paid) + '</td>'
+          + '<td class="num ' + (deb > 0 ? 'text-orange' : '') + '">' + fmt(deb > 0 ? deb : 0) + '</td>'
+          + '<td class="num">' + fmt(c.claim_amount) + '</td>'
+          + '<td class="num">' + fmt(c.awarded_amount) + '</td>'
+          + '</tr>';
+      }).join('');
+    })
+    .catch(function(e) {
+      document.getElementById('finance-loading').textContent = 'Ошибка загрузки: ' + e.message;
+    });
+})();
+</script>
+{% endblock %}
