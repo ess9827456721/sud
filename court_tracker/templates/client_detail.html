@@ -1,0 +1,435 @@
+{% extends "base.html" %}
+{% block title %}{{ client['name'] }}{% endblock %}
+{% block page_title %}Карточка клиента{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('clients_list') }}" class="btn btn-secondary btn-sm">← Клиенты</a>
+  <a href="{{ url_for('client_edit', client_id=client['id']) }}" class="btn btn-primary btn-sm">✏ Редактировать</a>
+  <form method="post" action="{{ url_for('client_delete', client_id=client['id']) }}"
+        onsubmit="return confirm('Удалить клиента?')" style="display:inline">
+    <button type="submit" class="btn btn-danger btn-sm">🗑</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+
+<!-- ===== Client header ===== -->
+<div class="case-header mb-3">
+  <div class="flex items-center gap-3">
+    <div class="avatar-lg">{{ (client['name'] or '?')[0].upper() }}</div>
+    <div>
+      <div class="flex items-center gap-2 mb-1">
+        <span class="badge-pill
+          {% if client['type'] == 'legal' %}badge-kad
+          {% elif client['type'] == 'ip' %}badge-soy
+          {% else %}badge-warning{% endif %}">
+          {{ {'legal':'ЮЛ','ip':'ИП','person':'Физ.лицо'}.get(client['type'], client['type']) }}
+        </span>
+        {% if client['status_egrul'] %}
+          <span class="badge-pill {{ 'badge-active' if client['status_egrul'] == 'ACTIVE' else 'badge-danger' }}">
+            {{ {'ACTIVE':'Действующее','LIQUIDATED':'Ликвидировано','BANKRUPT':'Банкротство'}.get(client['status_egrul'], client['status_egrul']) }}
+          </span>
+        {% endif %}
+      </div>
+      <div class="case-number">{{ client['name'] }}</div>
+      {% if client['short_name'] and client['short_name'] != client['name'] %}
+        <div class="text-muted">{{ client['short_name'] }}</div>
+      {% endif %}
+      <div class="case-meta mt-1">
+        {% if client['inn']  %}<span>ИНН: <strong>{{ client['inn'] }}</strong></span>{% endif %}
+        {% if client['ogrn'] %}<span>ОГРН: <strong>{{ client['ogrn'] }}</strong></span>{% endif %}
+        {% if client['phone']%}<span>📞 {{ client['phone'] }}</span>{% endif %}
+        {% if client['email']%}<span>✉ {{ client['email'] }}</span>{% endif %}
+      </div>
+      {% if client['inn'] %}
+        <button class="btn btn-secondary btn-sm mt-2" onclick="refreshEgrul('{{ client['inn'] }}', {{ client['id'] }})">
+          🔄 Обновить из ЕГРЮЛ
+        </button>
+        <span id="egrul-status" class="text-small text-muted" style="margin-left:8px"></span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ===== Tabs ===== -->
+<div class="tabs" id="client-tabs">
+  <button class="tab-btn active" onclick="switchTab('profile',this)">Профиль</button>
+  <button class="tab-btn" onclick="switchTab('cases',this)">
+    Дела <span class="badge" style="background:var(--primary)">{{ client['cases']|length }}</span>
+  </button>
+  <button class="tab-btn" onclick="switchTab('contacts',this)">
+    Контакты <span class="badge" style="background:var(--primary)">{{ client['contacts']|length }}</span>
+  </button>
+  <button class="tab-btn" onclick="switchTab('poa',this)">
+    Доверенности <span class="badge" style="background:var(--primary)">{{ client['powers_of_attorney']|length }}</span>
+  </button>
+  <button class="tab-btn" onclick="switchTab('finance',this)">Финансы</button>
+</div>
+
+<!-- ===== Tab: Профиль ===== -->
+<div class="tab-pane active" id="tab-profile">
+  <div class="card">
+    <div class="card-body">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Адрес</label>
+          <div class="flex items-center gap-2">
+            <input type="text" class="form-control"
+                   value="{{ client['address'] or '' }}"
+                   data-autosave="clients:{{ client['id'] }}:address">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Контактное лицо</label>
+          <div class="flex items-center gap-2">
+            <input type="text" class="form-control"
+                   value="{{ client['contact_person'] or '' }}"
+                   data-autosave="clients:{{ client['id'] }}:contact_person">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Телефон</label>
+          <div class="flex items-center gap-2">
+            <input type="text" class="form-control"
+                   value="{{ client['phone'] or '' }}"
+                   data-autosave="clients:{{ client['id'] }}:phone">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <div class="flex items-center gap-2">
+            <input type="email" class="form-control"
+                   value="{{ client['email'] or '' }}"
+                   data-autosave="clients:{{ client['id'] }}:email">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Примечания</label>
+        <div class="flex items-center gap-2">
+          <textarea class="form-control" rows="3"
+                    data-autosave="clients:{{ client['id'] }}:notes">{{ client['notes'] or '' }}</textarea>
+          <span class="autosave-indicator">✓</span>
+        </div>
+      </div>
+      <div class="text-small text-muted">
+        Создан: {{ (client['created_at'] or '')[:16] }} ·
+        Обновлён: {{ (client['updated_at'] or '')[:16] }}
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Tab: Дела ===== -->
+<div class="tab-pane" id="tab-cases">
+  <div class="card mb-3">
+    <div class="card-header">
+      <h2>Дела клиента ({{ client['cases']|length }})</h2>
+      <!-- Link case button -->
+      <button class="btn btn-primary btn-sm" onclick="document.getElementById('link-case-form').style.display='block'">
+        + Привязать дело
+      </button>
+    </div>
+
+    <!-- Link case form (hidden by default) -->
+    <div id="link-case-form" style="display:none;padding:14px 20px;border-bottom:1px solid var(--border)">
+      <div class="flex gap-2 items-center">
+        <select id="link-case-select" class="form-control" style="max-width:400px">
+          <option value="">— выберите дело —</option>
+          {% for c in all_cases %}
+            {% if c['client_id'] != client['id'] %}
+              <option value="{{ c['id'] }}">{{ c['case_number'] }} — {{ c['court'] or '?' }}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+        <button class="btn btn-success btn-sm" onclick="linkCase({{ client['id'] }})">Привязать</button>
+        <button class="btn btn-secondary btn-sm"
+                onclick="document.getElementById('link-case-form').style.display='none'">Отмена</button>
+      </div>
+    </div>
+
+    <div class="table-container">
+      {% if client['cases'] %}
+        <table class="data-table">
+          <thead>
+            <tr><th>Номер дела</th><th>Суд</th><th>Статус</th><th>Стадия</th><th>Источник</th><th>Обновлено</th></tr>
+          </thead>
+          <tbody>
+            {% for c in client['cases'] %}
+              <tr onclick="window.location='{{ url_for('case_detail', case_id=c['id']) }}'">
+                <td><strong>{{ c['case_number'] }}</strong></td>
+                <td>{{ c['court'] or '—' }}</td>
+                <td>{{ c['status'] or '—' }}</td>
+                <td>
+                  {% set stage_names = {'pretension':'Претензия','first':'1-я инст.','appeal':'Апелляция','cassation':'Кассация','supreme':'ВС','execution':'Исполнение','archive':'Архив'} %}
+                  {{ stage_names.get(c['stage'], c['stage'] or '—') }}
+                </td>
+                <td><span class="badge-pill badge-{{ c['source'] }}">{{ c['source'].upper() }}</span></td>
+                <td class="text-small text-muted">{{ (c['updated_at'] or '')[:10] }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="empty-state">
+          <span class="empty-icon">📂</span>
+          Нет привязанных дел
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ===== Tab: Контакты ===== -->
+<div class="tab-pane" id="tab-contacts">
+  <div class="card mb-3">
+    <div class="card-header"><h2>Контакты</h2></div>
+    <div class="card-body">
+      {% if client['contacts'] %}
+        <table class="data-table mb-3">
+          <thead>
+            <tr><th>ФИО</th><th>Должность/Роль</th><th>Телефон</th><th>Email</th><th>Заметки</th><th></th></tr>
+          </thead>
+          <tbody>
+            {% for ct in client['contacts'] %}
+              <tr>
+                <td>
+                  <input type="text" class="form-control form-control-inline"
+                         value="{{ ct['name'] or '' }}"
+                         data-autosave="client_contacts:{{ ct['id'] }}:name">
+                  <span class="autosave-indicator">✓</span>
+                </td>
+                <td>
+                  <input type="text" class="form-control form-control-inline"
+                         value="{{ ct['role'] or '' }}"
+                         data-autosave="client_contacts:{{ ct['id'] }}:role">
+                </td>
+                <td>
+                  <input type="text" class="form-control form-control-inline"
+                         value="{{ ct['phone'] or '' }}"
+                         data-autosave="client_contacts:{{ ct['id'] }}:phone">
+                </td>
+                <td>
+                  <input type="text" class="form-control form-control-inline"
+                         value="{{ ct['email'] or '' }}"
+                         data-autosave="client_contacts:{{ ct['id'] }}:email">
+                </td>
+                <td>
+                  <input type="text" class="form-control form-control-inline"
+                         value="{{ ct['notes'] or '' }}"
+                         data-autosave="client_contacts:{{ ct['id'] }}:notes">
+                </td>
+                <td>
+                  <form method="post"
+                        action="{{ url_for('contact_delete', client_id=client['id'], contact_id=ct['id']) }}"
+                        onsubmit="return confirm('Удалить контакт?')">
+                    <button type="submit" class="btn btn-danger btn-sm btn-icon">✕</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      <hr style="margin:16px 0">
+      <div class="section-header">+ Добавить контакт</div>
+      <form method="post" action="{{ url_for('contact_add', client_id=client['id']) }}">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">ФИО</label>
+            <input type="text" name="name" class="form-control" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Должность / Роль</label>
+            <input type="text" name="role" class="form-control" placeholder="Директор, Юрист…">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Телефон</label>
+            <input type="text" name="phone" class="form-control">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Email</label>
+            <input type="email" name="email" class="form-control">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Заметки</label>
+          <input type="text" name="notes" class="form-control">
+        </div>
+        <button type="submit" class="btn btn-success btn-sm">+ Добавить</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Tab: Доверенности ===== -->
+<div class="tab-pane" id="tab-poa">
+  <div class="card mb-3">
+    <div class="card-header"><h2>Доверенности</h2></div>
+    <div class="card-body">
+      {% if client['powers_of_attorney'] %}
+        {% for p in client['powers_of_attorney'] %}
+          {% set cls = p['expiry_date'] | urgency_class if p['expiry_date'] else 'urgency-safe' %}
+          <div class="deadline-item {{ cls }}" style="margin-bottom:10px;position:relative">
+            <div class="flex items-center gap-2" style="flex-wrap:wrap">
+              <strong>№ {{ p['number'] or '—' }}</strong>
+              <span class="text-muted text-small">Выдана: {{ p['issue_date'] or '—' }}</span>
+              <span class="text-muted text-small">Истекает:
+                <strong>{{ p['expiry_date'] or '—' }}</strong>
+                {% if p['expiry_date'] %}
+                  ({{ p['expiry_date'] | days_until }} дн.)
+                {% endif %}
+              </span>
+              {% if p['file_path'] %}
+                <a href="{{ url_for('static', filename='') }}{{ p['filename'] }}"
+                   target="_blank" class="btn btn-secondary btn-sm">📎 Скан</a>
+              {% endif %}
+              <form method="post"
+                    action="{{ url_for('poa_delete', client_id=client['id'], poa_id=p['id']) }}"
+                    onsubmit="return confirm('Удалить доверенность?')"
+                    style="margin-left:auto">
+                <button type="submit" class="btn btn-danger btn-sm btn-icon">✕</button>
+              </form>
+            </div>
+            {% if p['scope_description'] %}
+              <div class="dl-meta">{{ p['scope_description'] }}</div>
+            {% endif %}
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state mb-3">
+          <span class="empty-icon">📄</span>
+          Нет доверенностей
+        </div>
+      {% endif %}
+
+      <hr style="margin:16px 0">
+      <div class="section-header">+ Добавить доверенность</div>
+      <form method="post" action="{{ url_for('poa_add', client_id=client['id']) }}"
+            enctype="multipart/form-data">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Номер доверенности</label>
+            <input type="text" name="number" class="form-control" placeholder="б/н">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Привязать к делу</label>
+            <select name="case_id" class="form-control">
+              <option value="">— без дела —</option>
+              {% for c in client['cases'] %}
+                <option value="{{ c['id'] }}">{{ c['case_number'] }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Дата выдачи</label>
+            <input type="date" name="issue_date" class="form-control">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Срок действия (истекает)</label>
+            <input type="date" name="expiry_date" class="form-control">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Объём полномочий</label>
+          <textarea name="scope_description" class="form-control" rows="2"
+                    placeholder="Представление интересов в суде…"></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Скан доверенности (PDF, JPG…)</label>
+          <input type="file" name="scan" class="form-control"
+                 accept=".pdf,.jpg,.jpeg,.png,.docx">
+        </div>
+        <button type="submit" class="btn btn-success btn-sm">+ Добавить доверенность</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Tab: Финансы ===== -->
+<div class="tab-pane" id="tab-finance">
+  <div class="placeholder-section">
+    <span class="ph-icon">💰</span>
+    <strong>Финансовая сводка</strong>
+    <div class="text-small mt-1">
+      Активных дел: {{ client['cases']|selectattr('status', 'ne', 'Завершено')|list|length }}<br>
+      Расчёт сумм исков и гонораров — Phase 6
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function switchTab(name, btn) {
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    btn.classList.add('active');
+  }
+
+  // Restore active tab from hash
+  window.addEventListener('DOMContentLoaded', function() {
+    var hash = window.location.hash.replace('#tab-', '');
+    var validTabs = ['profile','cases','contacts','poa','finance'];
+    if (validTabs.includes(hash)) {
+      var btn = document.querySelector('[onclick*="switchTab(\'' + hash + '\'"]');
+      if (btn) switchTab(hash, btn);
+    }
+  });
+
+  function refreshEgrul(inn, clientId) {
+    var btn = event.target;
+    var statusEl = document.getElementById('egrul-status');
+    btn.disabled = true;
+    statusEl.textContent = 'Запрос…';
+    fetch('/api/egrul/' + inn)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { statusEl.textContent = 'Не найдено'; btn.disabled = false; return; }
+        // Autosave each fetched field
+        var fields = {
+          name: data.name, short_name: data.short_name,
+          ogrn: data.ogrn, address: data.address, status_egrul: data.status_egrul
+        };
+        var tasks = Object.entries(fields)
+          .filter(([k,v]) => v)
+          .map(([field, value]) =>
+            fetch('/api/autosave', {
+              method: 'POST',
+              headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({table:'clients', id: clientId, field, value})
+            })
+          );
+        Promise.all(tasks).then(() => {
+          statusEl.textContent = '✓ Обновлено';
+          setTimeout(() => location.reload(), 800);
+        });
+      })
+      .catch(() => { statusEl.textContent = 'Ошибка'; btn.disabled = false; });
+  }
+
+  function linkCase(clientId) {
+    var caseId = document.getElementById('link-case-select').value;
+    if (!caseId) { alert('Выберите дело'); return; }
+    fetch('/api/cases/' + caseId + '/set-client', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({client_id: clientId})
+    }).then(r => r.json()).then(d => {
+      if (d.success) location.reload();
+    });
+  }
+</script>
+{% endblock %}

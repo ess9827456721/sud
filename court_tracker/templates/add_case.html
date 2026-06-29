@@ -95,12 +95,26 @@
 
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Истец</label>
-            <input type="text" name="plaintiff_name" class="form-control">
+            <label class="form-label">Истец
+              <button type="button" class="btn btn-secondary btn-sm"
+                      style="float:right;margin-top:-2px"
+                      onclick="egrulFill('plaintiff_inn','plaintiff_name')">🔍 ЕГРЮЛ</button>
+            </label>
+            <input type="text" name="plaintiff_inn" id="plaintiff_inn"
+                   class="form-control mb-1" placeholder="ИНН истца (опционально)">
+            <input type="text" name="plaintiff_name" id="plaintiff_name"
+                   class="form-control" placeholder="Наименование истца">
           </div>
           <div class="form-group">
-            <label class="form-label">Ответчик</label>
-            <input type="text" name="respondent_name" class="form-control">
+            <label class="form-label">Ответчик
+              <button type="button" class="btn btn-secondary btn-sm"
+                      style="float:right;margin-top:-2px"
+                      onclick="egrulFill('respondent_inn','respondent_name')">🔍 ЕГРЮЛ</button>
+            </label>
+            <input type="text" name="respondent_inn" id="respondent_inn"
+                   class="form-control mb-1" placeholder="ИНН ответчика (опционально)">
+            <input type="text" name="respondent_name" id="respondent_name"
+                   class="form-control" placeholder="Наименование ответчика">
           </div>
         </div>
 
@@ -137,6 +151,18 @@
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.getElementById('tab-' + name).classList.add('active');
     event.target.classList.add('active');
+  }
+
+  function egrulFill(innFieldId, nameFieldId) {
+    var inn = document.getElementById(innFieldId).value.trim();
+    if (!inn) { alert('Введите ИНН'); return; }
+    fetch('/api/egrul/' + inn)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { alert('Не найдено в ЕГРЮЛ'); return; }
+        document.getElementById(nameFieldId).value = data.name || data.short_name || '';
+      })
+      .catch(() => alert('Ошибка запроса к ЕГРЮЛ'));
   }
 </script>
 {% endblock %}

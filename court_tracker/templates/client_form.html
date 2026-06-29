@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Редактировать клиента' if action == 'edit' else 'Новый клиент' }}{% endblock %}
+{% block page_title %}{{ 'Редактировать клиента' if action == 'edit' else 'Новый клиент' }}{% endblock %}
+{% block topbar_actions %}
+  <a href="{{ url_for('clients_list') }}" class="btn btn-secondary btn-sm">← Назад</a>
+{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width:720px">
+  <div class="card-header">
+    <h2>{{ 'Редактировать' if action == 'edit' else 'Добавить клиента' }}</h2>
+  </div>
+  <div class="card-body">
+    <form method="post"
+          action="{{ url_for('client_edit', client_id=client['id']) if action == 'edit' else url_for('client_add') }}">
+
+      <!-- EGRUL autofill banner -->
+      <div id="egrul-banner" style="display:none"
+           class="urgency-safe deadline-item mb-3" id="egrul-result">
+        Найдено в ЕГРЮЛ:
+        <strong id="egrul-name"></strong>
+        <button type="button" class="btn btn-primary btn-sm" style="float:right"
+                onclick="applyEgrul()">Применить</button>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Тип *</label>
+          <select name="type" class="form-control" id="ftype">
+            <option value="legal"  {{ 'selected' if not client or client['type'] == 'legal' }}>Юридическое лицо</option>
+            <option value="ip"     {{ 'selected' if client and client['type'] == 'ip' }}>ИП</option>
+            <option value="person" {{ 'selected' if client and client['type'] == 'person' }}>Физическое лицо</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">ИНН
+            <button type="button" class="btn btn-secondary btn-sm"
+                    style="float:right;margin-top:-2px"
+                    onclick="lookupEgrul()">🔍 ЕГРЮЛ</button>
+          </label>
+          <input type="text" name="inn" id="finn" class="form-control"
+                 value="{{ client['inn'] if client else '' }}"
+                 placeholder="10 или 12 цифр"
+                 {{ 'readonly' if action == 'edit' and client and client['inn'] }}>
+          {% if action == 'edit' and client and client['inn'] %}
+            <div class="text-small text-muted mt-1">ИНН нельзя изменить (используется как ключ)</div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Полное наименование *</label>
+        <input type="text" name="name" id="fname" class="form-control" required
+               value="{{ client['name'] if client else '' }}"
+               placeholder="ООО «Название»">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Краткое наименование</label>
+          <input type="text" name="short_name" id="fshort" class="form-control"
+                 value="{{ client['short_name'] if client else '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">ОГРН / ОГРНИП</label>
+          <input type="text" name="ogrn" id="fogrn" class="form-control"
+                 value="{{ client['ogrn'] if client else '' }}">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Адрес</label>
+        <input type="text" name="address" id="faddress" class="form-control"
+               value="{{ client['address'] if client else '' }}"
+               placeholder="Юридический адрес">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Статус ЕГРЮЛ</label>
+          <select name="status_egrul" id="fstatus" class="form-control">
+            <option value="">—</option>
+            <option value="ACTIVE"      {{ 'selected' if client and client['status_egrul'] == 'ACTIVE' }}>Действующее</option>
+            <option value="LIQUIDATED"  {{ 'selected' if client and client['status_egrul'] == 'LIQUIDATED' }}>Ликвидировано</option>
+            <option value="BANKRUPT"    {{ 'selected' if client and client['status_egrul'] == 'BANKRUPT' }}>Банкротство</option>
+            <option value="LIQUIDATING" {{ 'selected' if client and client['status_egrul'] == 'LIQUIDATING' }}>В процессе ликвидации</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Контактное лицо</label>
+          <input type="text" name="contact_person" class="form-control"
+                 value="{{ client['contact_person'] if client else '' }}">
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Телефон</label>
+          <input type="text" name="phone" class="form-control"
+                 value="{{ client['phone'] if client else '' }}"
+                 placeholder="+7 (___) ___-__-__">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input type="email" name="email" class="form-control"
+                 value="{{ client['email'] if client else '' }}">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Примечания</label>
+        <textarea name="notes" class="form-control" rows="3"
+                  placeholder="Внутренние заметки о клиенте">{{ client['notes'] if client else '' }}</textarea>
+      </div>
+
+      <div class="flex gap-2">
+        <button type="submit" class="btn btn-primary">
+          {{ '💾 Сохранить изменения' if action == 'edit' else '+ Добавить клиента' }}
+        </button>
+        {% if action == 'edit' %}
+          <a href="{{ url_for('client_detail', client_id=client['id']) }}"
+             class="btn btn-secondary">Отмена</a>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  var _egrulData = null;
+
+  function lookupEgrul() {
+    var inn = document.getElementById('finn').value.trim();
+    if (!inn) { alert('Введите ИНН'); return; }
+    fetch('/api/egrul/' + inn)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { alert('Не найдено в ЕГРЮЛ: ' + data.error); return; }
+        _egrulData = data;
+        document.getElementById('egrul-name').textContent = data.name || data.short_name;
+        document.getElementById('egrul-banner').style.display = 'block';
+      })
+      .catch(() => alert('Ошибка запроса к ЕГРЮЛ'));
+  }
+
+  function applyEgrul() {
+    if (!_egrulData) return;
+    if (_egrulData.name)        document.getElementById('fname').value    = _egrulData.name;
+    if (_egrulData.short_name)  document.getElementById('fshort').value   = _egrulData.short_name;
+    if (_egrulData.ogrn)        document.getElementById('fogrn').value    = _egrulData.ogrn;
+    if (_egrulData.address)     document.getElementById('faddress').value = _egrulData.address;
+    if (_egrulData.type) {
+      document.getElementById('ftype').value   = _egrulData.type;
+    }
+    if (_egrulData.status_egrul) {
+      document.getElementById('fstatus').value = _egrulData.status_egrul;
+    }
+    document.getElementById('egrul-banner').style.display = 'none';
+  }
+
+  // Also trigger on Enter in INN field
+  document.getElementById('finn').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); lookupEgrul(); }
+  });
+</script>
+{% endblock %}

@@ -273,17 +273,108 @@ def upsert_client(conn: sqlite3.Connection, data: dict) -> int:
     return client_id
 
 
+def get_all_clients(conn: sqlite3.Connection) -> list[dict]:
+    cur = conn.execute(
+        """SELECT cl.*,
+                  COUNT(DISTINCT c.id) AS case_count
+           FROM clients cl
+           LEFT JOIN cases c ON c.client_id = cl.id
+           GROUP BY cl.id
+           ORDER BY cl.name"""
+    )
+    return _rows(cur)
+
+
 def get_client_with_cases(conn: sqlite3.Connection, client_id: int) -> Optional[dict]:
     cur = conn.execute("SELECT * FROM clients WHERE id = ?", (client_id,))
     row = cur.fetchone()
     if not row:
         return None
     client = _row_to_dict(cur, row)
-    cur2 = conn.execute("SELECT * FROM cases WHERE client_id = ? ORDER BY updated_at DESC", (client_id,))
+    cur2 = conn.execute(
+        """SELECT c.*, k.stage
+           FROM cases c
+           LEFT JOIN kanban_stage k ON k.case_id = c.id
+           WHERE c.client_id = ?
+           ORDER BY c.updated_at DESC""",
+        (client_id,),
+    )
     client["cases"] = _rows(cur2)
     cur3 = conn.execute("SELECT * FROM client_contacts WHERE client_id = ?", (client_id,))
     client["contacts"] = _rows(cur3)
+    cur4 = conn.execute(
+        """SELECT p.*, a.file_path, a.filename
+           FROM client_powers_of_attorney p
+           LEFT JOIN attachments a ON a.id = p.attachment_id
+           WHERE p.client_id = ?
+           ORDER BY p.expiry_date""",
+        (client_id,),
+    )
+    client["powers_of_attorney"] = _rows(cur4)
     return client
+
+
+# ---------------------------------------------------------------------------
+# Client contacts
+# ---------------------------------------------------------------------------
+
+def add_contact(conn: sqlite3.Connection, data: dict) -> int:
+    cur = conn.execute(
+        "INSERT INTO client_contacts(client_id, name, role, phone, email, notes) VALUES (?,?,?,?,?,?)",
+        (data["client_id"], data.get("name"), data.get("role"),
+         data.get("phone"), data.get("email"), data.get("notes")),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def delete_contact(conn: sqlite3.Connection, contact_id: int) -> bool:
+    cur = conn.execute("DELETE FROM client_contacts WHERE id = ?", (contact_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Powers of attorney
+# ---------------------------------------------------------------------------
+
+def add_power_of_attorney(conn: sqlite3.Connection, data: dict) -> int:
+    now = _now()
+    cur = conn.execute(
+        """INSERT INTO client_powers_of_attorney
+            (client_id, case_id, number, issue_date, expiry_date,
+             scope_description, attachment_id, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            data["client_id"], data.get("case_id"), data.get("number"),
+            data.get("issue_date"), data.get("expiry_date"),
+            data.get("scope_description"), data.get("attachment_id"), now,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def delete_power_of_attorney(conn: sqlite3.Connection, poa_id: int) -> bool:
+    cur = conn.execute("DELETE FROM client_powers_of_attorney WHERE id = ?", (poa_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_expiring_powers_of_attorney(conn: sqlite3.Connection, days: int = 30) -> list[dict]:
+    cutoff = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    cur = conn.execute(
+        """SELECT p.*, cl.name AS client_name, cl.id AS client_id_ref
+           FROM client_powers_of_attorney p
+           JOIN clients cl ON cl.id = p.client_id
+           WHERE p.expiry_date IS NOT NULL
+             AND p.expiry_date >= ?
+             AND p.expiry_date <= ?
+           ORDER BY p.expiry_date""",
+        (today, cutoff),
+    )
+    return _rows(cur)
 
 
 # ---------------------------------------------------------------------------

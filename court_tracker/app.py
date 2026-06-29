@@ -141,6 +141,7 @@ def create_app() -> Flask:
 
         upcoming_hearings = queries.get_upcoming_hearings(conn, days=14)
         approaching_deadlines = queries.get_approaching_deadlines(conn, days=14)
+        expiring_poa = queries.get_expiring_powers_of_attorney(conn, days=30)
 
         recent_logs = conn.execute(
             """SELECT sl.*, c.case_number FROM sync_log sl
@@ -162,6 +163,7 @@ def create_app() -> Flask:
             soy_count=soy_count,
             upcoming_hearings=upcoming_hearings,
             approaching_deadlines=approaching_deadlines,
+            expiring_poa=expiring_poa,
             recent_logs=recent_logs,
             kanban_counts=kanban_counts,
         )
@@ -413,6 +415,223 @@ def create_app() -> Flask:
     def api_notifications_read_all():
         conn = _get_db()
         conn.execute("UPDATE notifications SET is_read=1")
+        conn.commit()
+        return jsonify({"success": True})
+
+    # ------------------------------------------------------------------
+    # Clients — HTML routes
+    # ------------------------------------------------------------------
+
+    @app.route("/clients")
+    def clients_list():
+        conn = _get_db()
+        clients = queries.get_all_clients(conn)
+        return render_template("clients.html", clients=clients)
+
+    @app.route("/clients/add", methods=["GET", "POST"])
+    def client_add():
+        if request.method == "POST":
+            conn = _get_db()
+            f = request.form
+            data = {
+                "type":           f.get("type", "legal"),
+                "name":           f.get("name", "").strip(),
+                "short_name":     f.get("short_name", "").strip() or None,
+                "inn":            f.get("inn", "").strip() or None,
+                "ogrn":           f.get("ogrn", "").strip() or None,
+                "address":        f.get("address", "").strip() or None,
+                "status_egrul":   f.get("status_egrul") or None,
+                "phone":          f.get("phone", "").strip() or None,
+                "email":          f.get("email", "").strip() or None,
+                "contact_person": f.get("contact_person", "").strip() or None,
+                "notes":          f.get("notes", "").strip() or None,
+            }
+            if not data["name"]:
+                flash("Укажите наименование клиента.", "danger")
+                return render_template("client_form.html", client=None, action="add")
+            client_id = queries.upsert_client(conn, data)
+            flash("Клиент добавлен.", "success")
+            return redirect(url_for("client_detail", client_id=client_id))
+        return render_template("client_form.html", client=None, action="add")
+
+    @app.route("/clients/<int:client_id>")
+    def client_detail(client_id: int):
+        conn = _get_db()
+        client = queries.get_client_with_cases(conn, client_id)
+        if not client:
+            flash("Клиент не найден.", "danger")
+            return redirect(url_for("clients_list"))
+        all_cases = queries.get_all_cases(conn)
+        return render_template("client_detail.html", client=client, all_cases=all_cases)
+
+    @app.route("/clients/<int:client_id>/edit", methods=["GET", "POST"])
+    def client_edit(client_id: int):
+        conn = _get_db()
+        client = queries.get_client_with_cases(conn, client_id)
+        if not client:
+            flash("Клиент не найден.", "danger")
+            return redirect(url_for("clients_list"))
+        if request.method == "POST":
+            f = request.form
+            data = {
+                "type":           f.get("type", client["type"]),
+                "name":           f.get("name", "").strip() or client["name"],
+                "short_name":     f.get("short_name", "").strip() or None,
+                "inn":            client["inn"],  # INN is the upsert key — don't change
+                "ogrn":           f.get("ogrn", "").strip() or None,
+                "address":        f.get("address", "").strip() or None,
+                "status_egrul":   f.get("status_egrul") or None,
+                "phone":          f.get("phone", "").strip() or None,
+                "email":          f.get("email", "").strip() or None,
+                "contact_person": f.get("contact_person", "").strip() or None,
+                "notes":          f.get("notes", "").strip() or None,
+            }
+            # upsert_client matches by INN; fall back to direct UPDATE when INN is missing
+            if data["inn"]:
+                queries.upsert_client(conn, data)
+            else:
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                conn.execute(
+                    """UPDATE clients SET type=?,name=?,short_name=?,ogrn=?,address=?,
+                       status_egrul=?,phone=?,email=?,contact_person=?,notes=?,updated_at=?
+                       WHERE id=?""",
+                    (data["type"], data["name"], data["short_name"], data["ogrn"],
+                     data["address"], data["status_egrul"], data["phone"], data["email"],
+                     data["contact_person"], data["notes"], now, client_id),
+                )
+                conn.commit()
+            flash("Клиент обновлён.", "success")
+            return redirect(url_for("client_detail", client_id=client_id))
+        return render_template("client_form.html", client=client, action="edit")
+
+    @app.route("/clients/<int:client_id>/delete", methods=["POST"])
+    def client_delete(client_id: int):
+        conn = _get_db()
+        active = conn.execute(
+            "SELECT COUNT(*) FROM cases WHERE client_id=? AND status NOT IN ('Завершено','Прекращено')",
+            (client_id,),
+        ).fetchone()[0]
+        if active > 0:
+            flash(f"Нельзя удалить клиента: есть {active} активных дел.", "danger")
+            return redirect(url_for("client_detail", client_id=client_id))
+        conn.execute("DELETE FROM clients WHERE id=?", (client_id,))
+        conn.commit()
+        flash("Клиент удалён.", "success")
+        return redirect(url_for("clients_list"))
+
+    # ------------------------------------------------------------------
+    # Client contacts
+    # ------------------------------------------------------------------
+
+    @app.route("/clients/<int:client_id>/contacts/add", methods=["POST"])
+    def contact_add(client_id: int):
+        conn = _get_db()
+        f = request.form
+        queries.add_contact(conn, {
+            "client_id": client_id,
+            "name":  f.get("name", "").strip(),
+            "role":  f.get("role", "").strip(),
+            "phone": f.get("phone", "").strip(),
+            "email": f.get("email", "").strip(),
+            "notes": f.get("notes", "").strip(),
+        })
+        flash("Контакт добавлен.", "success")
+        return redirect(url_for("client_detail", client_id=client_id) + "#tab-contacts")
+
+    @app.route("/clients/<int:client_id>/contacts/<int:contact_id>/delete", methods=["POST"])
+    def contact_delete(client_id: int, contact_id: int):
+        conn = _get_db()
+        queries.delete_contact(conn, contact_id)
+        flash("Контакт удалён.", "success")
+        return redirect(url_for("client_detail", client_id=client_id) + "#tab-contacts")
+
+    # ------------------------------------------------------------------
+    # Powers of attorney
+    # ------------------------------------------------------------------
+
+    @app.route("/clients/<int:client_id>/poa/add", methods=["POST"])
+    def poa_add(client_id: int):
+        conn = _get_db()
+        f = request.form
+        file = request.files.get("scan")
+        attachment_id = None
+        if file and file.filename:
+            import os, uuid
+            from court_tracker.config import ATTACHMENTS_DIR
+            ext = os.path.splitext(file.filename)[1]
+            stored = f"poa_{uuid.uuid4().hex}{ext}"
+            dest = ATTACHMENTS_DIR / stored
+            file.save(str(dest))
+            # We need a case_id for attachments FK — use NULL pattern via dummy case
+            # PoA scans are stored with case_id=0 sentinel (FK allows NULL, use 0 workaround)
+            # Actually the schema has case_id NOT NULL; store against the first linked case or skip
+            # For now: find any case linked to this client
+            row = conn.execute("SELECT id FROM cases WHERE client_id=? LIMIT 1", (client_id,)).fetchone()
+            if row:
+                cur = conn.execute(
+                    """INSERT INTO attachments(case_id,filename,stored_name,file_path,file_size,mime_type)
+                       VALUES (?,?,?,?,?,?)""",
+                    (row[0], file.filename, stored, str(dest),
+                     os.path.getsize(str(dest)), file.content_type),
+                )
+                attachment_id = cur.lastrowid
+                conn.commit()
+        queries.add_power_of_attorney(conn, {
+            "client_id":        client_id,
+            "case_id":          f.get("case_id") or None,
+            "number":           f.get("number", "").strip() or None,
+            "issue_date":       f.get("issue_date") or None,
+            "expiry_date":      f.get("expiry_date") or None,
+            "scope_description":f.get("scope_description", "").strip() or None,
+            "attachment_id":    attachment_id,
+        })
+        flash("Доверенность добавлена.", "success")
+        return redirect(url_for("client_detail", client_id=client_id) + "#tab-poa")
+
+    @app.route("/clients/<int:client_id>/poa/<int:poa_id>/delete", methods=["POST"])
+    def poa_delete(client_id: int, poa_id: int):
+        conn = _get_db()
+        queries.delete_power_of_attorney(conn, poa_id)
+        flash("Доверенность удалена.", "success")
+        return redirect(url_for("client_detail", client_id=client_id) + "#tab-poa")
+
+    # ------------------------------------------------------------------
+    # Client JSON API
+    # ------------------------------------------------------------------
+
+    @app.route("/api/clients")
+    def api_clients():
+        conn = _get_db()
+        return jsonify(queries.get_all_clients(conn))
+
+    @app.route("/api/clients", methods=["POST"])
+    def api_client_create():
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        if not data.get("name"):
+            return jsonify({"error": "name required"}), 400
+        client_id = queries.upsert_client(conn, data)
+        client = queries.get_client_with_cases(conn, client_id)
+        return jsonify(dict(client)), 201
+
+    @app.route("/api/egrul/<inn>")
+    def api_egrul(inn: str):
+        from court_tracker.services.egrul_service import fetch_by_inn
+        data = fetch_by_inn(inn)
+        if data is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(data)
+
+    @app.route("/api/cases/<int:case_id>/set-client", methods=["POST"])
+    def api_set_client(case_id: int):
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        client_id = data.get("client_id")
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+        conn.execute(
+            "UPDATE cases SET client_id=?, updated_at=? WHERE id=?",
+            (client_id, now, case_id),
+        )
         conn.commit()
         return jsonify({"success": True})
 

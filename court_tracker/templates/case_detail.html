@@ -93,14 +93,22 @@
         </div>
       </div>
       <div class="form-group">
-        <label class="form-label">Клиент</label>
-        <select class="form-control" data-autosave="cases:{{ case['id'] }}:client_id">
+        <label class="form-label">Клиент
+          {% if case['client_id'] %}
+            <a href="{{ url_for('client_detail', client_id=case['client_id']) }}"
+               class="btn btn-secondary btn-sm" style="float:right;margin-top:-2px">
+              👤 Карточка клиента
+            </a>
+          {% endif %}
+        </label>
+        <select class="form-control" id="client-select"
+                onchange="setClient({{ case['id'] }}, this.value)">
           <option value="">— не привязан —</option>
           {% for cl in clients %}
             <option value="{{ cl[0] }}" {{ 'selected' if case['client_id'] == cl[0] }}>{{ cl[1] }}</option>
           {% endfor %}
         </select>
-        <span class="autosave-indicator">✓</span>
+        <span id="client-save-indicator" class="autosave-indicator">✓</span>
       </div>
       {% if case['source'] == 'soy' %}
         <div class="form-group">
@@ -196,4 +204,22 @@
   <div class="text-small mt-1">Раздел появится в Phase 4</div>
 </div>
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function setClient(caseId, clientId) {
+    fetch('/api/cases/' + caseId + '/set-client', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: clientId || null})
+    }).then(r => r.json()).then(d => {
+      var ind = document.getElementById('client-save-indicator');
+      if (d.success && ind) {
+        ind.classList.add('show');
+        setTimeout(() => ind.classList.remove('show'), 2000);
+      }
+    });
+  }
+</script>
 {% endblock %}

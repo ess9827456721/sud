@@ -131,6 +131,33 @@
 
 </div>
 
+<!-- ===== Expiring powers of attorney ===== -->
+{% if expiring_poa %}
+<div class="card mt-3">
+  <div class="card-header">
+    <h2>📄 Истекающие доверенности (30 дней)</h2>
+  </div>
+  <div class="card-body">
+    {% for p in expiring_poa %}
+      {% set cls = p['expiry_date'] | urgency_class %}
+      {% set days = p['expiry_date'] | days_until %}
+      <div class="deadline-item {{ cls }}">
+        <span class="dl-date">
+          {% if days == 0 %}Сегодня{% elif days == 1 %}Завтра{% else %}{{ days }} дн.{% endif %}
+        </span>
+        <div class="dl-title">
+          <a href="{{ url_for('client_detail', client_id=p['client_id_ref']) }}">{{ p['client_name'] }}</a>
+          — дов. № {{ p['number'] or 'б/н' }}
+        </div>
+        <div class="dl-meta">Истекает: {{ p['expiry_date'] }}
+          {% if p['scope_description'] %} · {{ p['scope_description'][:60] }}{% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- ===== Recent sync log ===== -->
 <div class="card mt-3">
   <div class="card-header">
