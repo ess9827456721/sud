@@ -804,3 +804,215 @@ def get_case_critical_deadline(conn: sqlite3.Connection, case_id: int) -> Option
         (case_id, today, cutoff),
     ).fetchone()
     return row[0] if row else None
+
+
+# ---------------------------------------------------------------------------
+# Analytics (Phase 6)
+# ---------------------------------------------------------------------------
+
+def get_analytics_cases(conn: sqlite3.Connection) -> dict:
+    from datetime import date as _date
+
+    total = conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
+    active = conn.execute(
+        "SELECT COUNT(*) FROM cases WHERE status NOT IN ('Завершено','Прекращено')"
+    ).fetchone()[0]
+
+    outcomes: dict[str, int] = dict(
+        conn.execute("SELECT COALESCE(outcome,'pending'), COUNT(*) FROM cases GROUP BY outcome").fetchall()
+    )
+    won     = outcomes.get("won", 0)
+    lost    = outcomes.get("lost", 0)
+    partial = outcomes.get("partial", 0)
+    pending = outcomes.get("pending", 0)
+    win_rate = round(won / (won + lost) * 100, 1) if (won + lost) > 0 else 0.0
+
+    by_type   = dict(conn.execute(
+        "SELECT case_type, COUNT(*) FROM cases WHERE case_type IS NOT NULL GROUP BY case_type ORDER BY 2 DESC"
+    ).fetchall())
+    by_source = dict(conn.execute("SELECT source, COUNT(*) FROM cases GROUP BY source").fetchall())
+
+    # New / closed per month for last 12 months
+    new_by_month: dict[str, int] = dict(conn.execute(
+        """SELECT strftime('%Y-%m', created_at), COUNT(*)
+           FROM cases WHERE created_at >= date('now','-12 months')
+           GROUP BY 1 ORDER BY 1"""
+    ).fetchall())
+    closed_by_month: dict[str, int] = dict(conn.execute(
+        """SELECT strftime('%Y-%m', updated_at), COUNT(*)
+           FROM cases WHERE status IN ('Завершено','Прекращено')
+             AND updated_at >= date('now','-12 months')
+           GROUP BY 1 ORDER BY 1"""
+    ).fetchall())
+
+    by_month = []
+    today = _date.today()
+    for i in range(11, -1, -1):
+        mo = today.month - i
+        yr = today.year
+        while mo <= 0:
+            mo += 12
+            yr -= 1
+        m_str = f"{yr}-{mo:02d}"
+        by_month.append({"month": m_str,
+                          "new": new_by_month.get(m_str, 0),
+                          "closed": closed_by_month.get(m_str, 0)})
+
+    avg_row = conn.execute(
+        """SELECT AVG(julianday(updated_at) - julianday(start_date))
+           FROM cases WHERE status IN ('Завершено','Прекращено') AND start_date IS NOT NULL"""
+    ).fetchone()[0]
+    avg_duration = round(avg_row) if avg_row else None
+
+    by_court = []
+    for court, cnt, w, l in conn.execute(
+        """SELECT court,
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN outcome='won'  THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN outcome='lost' THEN 1 ELSE 0 END)
+           FROM cases WHERE court IS NOT NULL
+           GROUP BY court ORDER BY total DESC LIMIT 20"""
+    ).fetchall():
+        by_court.append({
+            "court": court, "total": cnt, "won": w, "lost": l,
+            "win_rate_pct": round(w / (w + l) * 100) if (w + l) > 0 else None,
+        })
+
+    return {
+        "total_cases": total, "active_cases": active,
+        "won": won, "lost": lost, "partial": partial, "pending": pending,
+        "win_rate_pct": win_rate,
+        "by_type": by_type, "by_source": by_source,
+        "by_month": by_month,
+        "avg_duration_days": avg_duration,
+        "by_court": by_court,
+    }
+
+
+def get_analytics_judges(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """SELECT judge, court,
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN outcome='won'  THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN outcome='lost' THEN 1 ELSE 0 END)
+           FROM cases
+           WHERE judge IS NOT NULL AND judge != ''
+           GROUP BY judge, court
+           HAVING total >= 2
+           ORDER BY total DESC"""
+    ).fetchall()
+    result = []
+    for judge, court, total, won, lost in rows:
+        result.append({
+            "judge": judge, "court": court or "—",
+            "total_cases": total, "won": won, "lost": lost,
+            "win_rate_pct": round(won / (won + lost) * 100) if (won + lost) > 0 else None,
+        })
+    return result
+
+
+def get_analytics_finance(conn: sqlite3.Connection) -> dict:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(claim_amount),0), COALESCE(SUM(awarded_amount),0), COALESCE(SUM(state_duty),0) FROM cases"
+    ).fetchone()
+    total_claim, total_awarded, total_duty = row
+
+    cl_row = conn.execute(
+        "SELECT COALESCE(SUM(fee_total),0), COALESCE(SUM(fee_paid),0) FROM clients"
+    ).fetchone()
+    fee_billed, fee_paid = cl_row
+
+    by_client = []
+    for row2 in conn.execute(
+        """SELECT cl.name,
+                  COUNT(c.id)                                AS active_cases,
+                  COALESCE(SUM(c.claim_amount), 0)          AS claim_total,
+                  COALESCE(cl.fee_total, 0)                 AS fee_total,
+                  COALESCE(cl.fee_paid, 0)                  AS fee_paid
+           FROM clients cl
+           LEFT JOIN cases c ON c.client_id = cl.id
+             AND (c.status IS NULL OR c.status NOT IN ('Завершено','Прекращено'))
+           GROUP BY cl.id ORDER BY cl.name"""
+    ).fetchall():
+        by_client.append({
+            "client_name": row2[0],
+            "active_cases": row2[1],
+            "claim_total":  row2[2],
+            "fee_total":    row2[3],
+            "fee_paid":     row2[4],
+        })
+
+    return {
+        "total_claim_amount":  total_claim,
+        "total_awarded":       total_awarded,
+        "total_state_duty":    total_duty,
+        "total_fee_billed":    fee_billed,
+        "total_fee_paid":      fee_paid,
+        "fee_receivable":      fee_billed - fee_paid,
+        "by_client":           by_client,
+    }
+
+
+def get_dashboard_financials(conn: sqlite3.Connection) -> dict:
+    row = conn.execute(
+        """SELECT COALESCE(SUM(claim_amount), 0)
+           FROM cases WHERE status IS NULL OR status NOT IN ('Завершено','Прекращено')"""
+    ).fetchone()
+    total_active_claims = row[0]
+    cl_row = conn.execute(
+        "SELECT COALESCE(SUM(fee_total),0) - COALESCE(SUM(fee_paid),0) FROM clients"
+    ).fetchone()
+    return {
+        "total_active_claims": total_active_claims,
+        "fee_receivable":      cl_row[0],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Calendar (Phase 6)
+# ---------------------------------------------------------------------------
+
+def get_calendar_events(conn: sqlite3.Connection, year: int, month: int) -> dict:
+    import calendar as _cal
+    _, last_day = _cal.monthrange(year, month)
+    start = f"{year}-{month:02d}-01"
+    end   = f"{year}-{month:02d}-{last_day:02d}"
+
+    days: dict[str, list[dict]] = {}
+
+    for ev_date, ev_type, desc, is_fut, case_num, case_id in conn.execute(
+        """SELECT e.event_date, e.event_type, e.description, e.is_future,
+                  c.case_number, c.id
+           FROM events e JOIN cases c ON c.id = e.case_id
+           WHERE e.event_date BETWEEN ? AND ?
+           ORDER BY e.event_date""",
+        (start, end),
+    ).fetchall():
+        d = (ev_date or "")[:10]
+        days.setdefault(d, []).append({
+            "type":        "event",
+            "event_type":  ev_type or "",
+            "description": desc or "",
+            "is_future":   bool(is_fut),
+            "case_number": case_num,
+            "case_id":     case_id,
+        })
+
+    for dl_date, dl_type, case_num, case_id in conn.execute(
+        """SELECT d.deadline_date, d.deadline_type, c.case_number, c.id
+           FROM deadlines d JOIN cases c ON c.id = d.case_id
+           WHERE d.deadline_date BETWEEN ? AND ? AND d.is_done = 0
+           ORDER BY d.deadline_date""",
+        (start, end),
+    ).fetchall():
+        d = (dl_date or "")[:10]
+        days.setdefault(d, []).append({
+            "type":        "deadline",
+            "event_type":  dl_type or "Срок",
+            "description": "",
+            "is_future":   False,
+            "case_number": case_num,
+            "case_id":     case_id,
+        })
+
+    return {"year": year, "month": month, "days": days}

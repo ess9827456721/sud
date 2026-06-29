@@ -105,6 +105,18 @@ def create_app() -> Flask:
     # Template helpers
     # ------------------------------------------------------------------
 
+    @app.template_filter("fmt_money")
+    def fmt_money(v) -> str:
+        if v is None:
+            return "—"
+        try:
+            f = float(v)
+            if f == 0:
+                return "—"
+            return f"{f:,.0f} ₽".replace(",", " ")
+        except (TypeError, ValueError):
+            return "—"
+
     @app.template_filter("urgency_class")
     def urgency_class(deadline_date_str: str) -> str:
         try:
@@ -166,6 +178,7 @@ def create_app() -> Flask:
             ).fetchall()
         )
 
+        fin = queries.get_dashboard_financials(conn)
         return render_template(
             "index.html",
             total_active=len(active),
@@ -177,6 +190,8 @@ def create_app() -> Flask:
             expiring_poa=expiring_poa,
             recent_logs=recent_logs,
             kanban_counts=kanban_counts,
+            total_active_claims=fin["total_active_claims"],
+            fee_receivable=fin["fee_receivable"],
         )
 
     # ------------------------------------------------------------------
@@ -954,6 +969,49 @@ def create_app() -> Flask:
         except OSError:
             pass
         return jsonify({"success": True})
+
+    # ------------------------------------------------------------------
+    # Analytics (Phase 6)
+    # ------------------------------------------------------------------
+
+    @app.route("/analytics")
+    def analytics():
+        return render_template("analytics.html")
+
+    @app.route("/api/analytics/cases")
+    def api_analytics_cases():
+        conn = _get_db()
+        return jsonify(queries.get_analytics_cases(conn))
+
+    @app.route("/api/analytics/judges")
+    def api_analytics_judges():
+        conn = _get_db()
+        return jsonify(queries.get_analytics_judges(conn))
+
+    @app.route("/api/analytics/finance")
+    def api_analytics_finance():
+        conn = _get_db()
+        return jsonify(queries.get_analytics_finance(conn))
+
+    # ------------------------------------------------------------------
+    # Calendar (Phase 6)
+    # ------------------------------------------------------------------
+
+    @app.route("/calendar")
+    def calendar():
+        return render_template("calendar.html")
+
+    @app.route("/api/calendar")
+    def api_calendar():
+        conn = _get_db()
+        try:
+            year  = int(request.args.get("year",  datetime.utcnow().year))
+            month = int(request.args.get("month", datetime.utcnow().month))
+        except ValueError:
+            return jsonify({"error": "invalid year/month"}), 400
+        if not (1 <= month <= 12):
+            return jsonify({"error": "month out of range"}), 400
+        return jsonify(queries.get_calendar_events(conn, year, month))
 
     # ------------------------------------------------------------------
     # Document Templates (Phase 5)

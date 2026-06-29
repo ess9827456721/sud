@@ -29,6 +29,20 @@
     <div class="metric-value">{{ soy_count }}</div>
     <div class="metric-label">Дел СОЮ</div>
   </div>
+  {% if total_active_claims %}
+  <div class="metric-card blue">
+    <span class="metric-icon">⚖</span>
+    <div class="metric-value" style="font-size:18px">{{ total_active_claims | fmt_money }}</div>
+    <div class="metric-label">Сумма активных исков</div>
+  </div>
+  {% endif %}
+  {% if fee_receivable %}
+  <div class="metric-card {{ 'orange' if fee_receivable > 0 else 'green' }}">
+    <span class="metric-icon">💰</span>
+    <div class="metric-value" style="font-size:18px">{{ fee_receivable | fmt_money }}</div>
+    <div class="metric-label">Дебиторка по гонорарам</div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- ===== Kanban summary ===== -->

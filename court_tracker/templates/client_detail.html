@@ -358,12 +358,84 @@
 
 <!-- ===== Tab: Финансы ===== -->
 <div class="tab-pane" id="tab-finance">
-  <div class="placeholder-section">
-    <span class="ph-icon">💰</span>
-    <strong>Финансовая сводка</strong>
-    <div class="text-small mt-1">
-      Активных дел: {{ client['cases']|selectattr('status', 'ne', 'Завершено')|list|length }}<br>
-      Расчёт сумм исков и гонораров — Phase 6
+  <div class="card mb-3">
+    <div class="card-header"><h2>💰 Договор и гонорар</h2></div>
+    <div class="card-body">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Номер договора</label>
+          <div class="flex items-center gap-2">
+            <input type="text" class="form-control"
+                   value="{{ client.get('contract_number') or '' }}"
+                   placeholder="№ договора"
+                   data-autosave="clients:{{ client['id'] }}:contract_number">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Дата договора</label>
+          <div class="flex items-center gap-2">
+            <input type="date" class="form-control"
+                   value="{{ client.get('contract_date') or '' }}"
+                   data-autosave="clients:{{ client['id'] }}:contract_date">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Сумма гонорара по договору (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ client.get('fee_total') or '' }}"
+                   placeholder="0"
+                   data-autosave="clients:{{ client['id'] }}:fee_total">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Оплачено (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ client.get('fee_paid') or '' }}"
+                   placeholder="0"
+                   data-autosave="clients:{{ client['id'] }}:fee_paid">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      {% set fee_t = client.get('fee_total') or 0 %}
+      {% set fee_p = client.get('fee_paid') or 0 %}
+      {% if fee_t %}
+      <div class="metric-row mt-2">
+        <span class="text-muted text-small">Дебиторка: </span>
+        <strong style="color:{{ 'var(--danger)' if (fee_t - fee_p) > 0 else 'var(--success)' }}">
+          {{ (fee_t - fee_p) | fmt_money }}
+        </strong>
+        <span class="text-muted text-small" style="margin-left:8px">
+          ({{ fee_p | fmt_money }} из {{ fee_t | fmt_money }})
+        </span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>📊 Сводка по делам</h2></div>
+    <div class="card-body">
+      {% set active_cases = client['cases'] | selectattr('status', 'ne', 'Завершено') | list %}
+      <div class="metrics-grid" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
+        <div class="metric-card">
+          <span class="metric-icon">📁</span>
+          <div class="metric-value">{{ client['cases']|length }}</div>
+          <div class="metric-label">Всего дел</div>
+        </div>
+        <div class="metric-card green">
+          <span class="metric-icon">⚖</span>
+          <div class="metric-value">{{ active_cases|length }}</div>
+          <div class="metric-label">Активных дел</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>

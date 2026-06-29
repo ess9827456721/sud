@@ -83,7 +83,7 @@
 <!-- ===== Editable fields ===== -->
 <div class="dash-grid mb-3">
   <div class="card">
-    <div class="card-header"><h2>✏ Быстрое редактирование</h2></div>
+    <div class="card-header"><h2>✏ Редактирование</h2></div>
     <div class="card-body">
       <div class="form-group">
         <label class="form-label">Метка (custom_label)</label>
@@ -140,6 +140,70 @@
           {% endif %}
         </div>
       {% endif %}
+    </div>
+  </div>
+
+  <!-- Financial fields -->
+  <div class="card">
+    <div class="card-header"><h2>💰 Финансы по делу</h2></div>
+    <div class="card-body">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Сумма иска (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['claim_amount'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:claim_amount">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Взыскано (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['awarded_amount'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:awarded_amount">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Госпошлина (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['state_duty'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:state_duty">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Судебные расходы заявлено (₽)</label>
+          <div class="flex items-center gap-2">
+            <input type="number" step="0.01" class="form-control"
+                   value="{{ case['legal_costs_claimed'] or '' }}"
+                   placeholder="0"
+                   data-autosave="cases:{{ case['id'] }}:legal_costs_claimed">
+            <span class="autosave-indicator">✓</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Результат дела</label>
+        <select class="form-control"
+                data-autosave="cases:{{ case['id'] }}:outcome">
+          <option value="">— не определён —</option>
+          <option value="won"     {{ 'selected' if case.get('outcome') == 'won' }}>Выиграно</option>
+          <option value="lost"    {{ 'selected' if case.get('outcome') == 'lost' }}>Проиграно</option>
+          <option value="partial" {{ 'selected' if case.get('outcome') == 'partial' }}>Частично</option>
+          <option value="pending" {{ 'selected' if case.get('outcome') == 'pending' }}>В процессе</option>
+          <option value="other"   {{ 'selected' if case.get('outcome') == 'other' }}>Иное</option>
+        </select>
+        <span class="autosave-indicator">✓</span>
+      </div>
     </div>
   </div>
 

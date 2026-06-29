@@ -214,17 +214,37 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 def run_migrations(conn: sqlite3.Connection) -> None:
     """Apply any schema additions that may be missing in older DBs."""
-    cursor = conn.execute("PRAGMA table_info(cases)")
-    existing = {row[1] for row in cursor.fetchall()}
-    migrations = [
+    # ── cases ──────────────────────────────────────────────────────────────
+    cases_cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+    cases_migrations = [
         ("soy_scraping_enabled",  "ALTER TABLE cases ADD COLUMN soy_scraping_enabled  INTEGER NOT NULL DEFAULT 0"),
         ("soy_scrape_status",     "ALTER TABLE cases ADD COLUMN soy_scrape_status      TEXT NOT NULL DEFAULT 'pending'"),
         ("soy_scrape_last_ok",    "ALTER TABLE cases ADD COLUMN soy_scrape_last_ok     TEXT"),
         ("soy_scrape_error_msg",  "ALTER TABLE cases ADD COLUMN soy_scrape_error_msg   TEXT"),
         ("soy_scrape_attempts",   "ALTER TABLE cases ADD COLUMN soy_scrape_attempts    INTEGER NOT NULL DEFAULT 0"),
+        # Phase 6 financial fields
+        ("claim_amount",          "ALTER TABLE cases ADD COLUMN claim_amount          REAL"),
+        ("awarded_amount",        "ALTER TABLE cases ADD COLUMN awarded_amount        REAL"),
+        ("state_duty",            "ALTER TABLE cases ADD COLUMN state_duty            REAL"),
+        ("legal_costs_claimed",   "ALTER TABLE cases ADD COLUMN legal_costs_claimed   REAL"),
+        ("outcome",               "ALTER TABLE cases ADD COLUMN outcome               TEXT"),
     ]
-    for col, sql in migrations:
-        if col not in existing:
+    for col, sql in cases_migrations:
+        if col not in cases_cols:
             conn.execute(sql)
             logger.info("Migration applied: added column cases.%s", col)
+
+    # ── clients ─────────────────────────────────────────────────────────────
+    client_cols = {row[1] for row in conn.execute("PRAGMA table_info(clients)").fetchall()}
+    client_migrations = [
+        ("contract_number", "ALTER TABLE clients ADD COLUMN contract_number TEXT"),
+        ("contract_date",   "ALTER TABLE clients ADD COLUMN contract_date   TEXT"),
+        ("fee_total",       "ALTER TABLE clients ADD COLUMN fee_total       REAL"),
+        ("fee_paid",        "ALTER TABLE clients ADD COLUMN fee_paid        REAL"),
+    ]
+    for col, sql in client_migrations:
+        if col not in client_cols:
+            conn.execute(sql)
+            logger.info("Migration applied: added column clients.%s", col)
+
     conn.commit()

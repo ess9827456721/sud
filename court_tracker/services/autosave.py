@@ -20,10 +20,15 @@ WHITELISTED_FIELDS: dict[str, set[str]] = {
         "kad_url", "soy_url_first", "soy_url_appeal", "soy_url_cassation",
         "custom_label", "custom_status", "client_id",
         "soy_scraping_enabled", "soy_scrape_status",
+        # Phase 6 financial fields
+        "claim_amount", "awarded_amount", "state_duty",
+        "legal_costs_claimed", "outcome",
     },
     "clients": {
         "type", "name", "short_name", "inn", "ogrn", "address",
         "status_egrul", "phone", "email", "contact_person", "notes",
+        # Phase 6 financial fields
+        "contract_number", "contract_date", "fee_total", "fee_paid",
     },
     "client_contacts": {"name", "role", "phone", "email", "notes"},
     "client_powers_of_attorney": {
