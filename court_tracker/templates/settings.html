@@ -4,36 +4,129 @@
 
 {% block content %}
 
-<div class="card" style="max-width:540px">
-  <div class="card-header"><h2>⚙ Настройки приложения</h2></div>
-  <div class="card-body">
-    <form method="post" action="{{ url_for('settings') }}">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
 
-      <div class="form-group">
-        <label class="form-label">Интервал автосинхронизации (часы)</label>
-        <select name="sync_interval_hours" class="form-control">
-          {% for h in ['1','2','4','8','24'] %}
-            <option value="{{ h }}" {{ 'selected' if settings.sync_interval_hours == h }}>{{ h }} ч.</option>
-          {% endfor %}
-        </select>
+  <!-- ===== Sync settings ===== -->
+  <div class="card">
+    <div class="card-header"><h2>🔄 Автосинхронизация</h2></div>
+    <div class="card-body">
+
+      <!-- Sync status -->
+      {% if sync_status %}
+      <div class="sync-status-box mb-3">
+        <div class="sync-status-row">
+          <span>Статус:</span>
+          <strong>{{ 'Выполняется…' if sync_status.is_running else 'Ожидает' }}</strong>
+        </div>
+        <div class="sync-status-row">
+          <span>Последняя синхронизация:</span>
+          <span>{{ (sync_status.last_sync or '—')[:16] }}</span>
+        </div>
+        <div class="sync-status-row">
+          <span>Следующая:</span>
+          <span>{{ (sync_status.next_sync or '—')[:16] }}</span>
+        </div>
+        <div class="sync-status-row">
+          <span>Всего дел в базе:</span>
+          <span>{{ sync_status.cases_count }}</span>
+        </div>
       </div>
+      <button type="button" class="btn btn-primary mb-3" id="sync-now-btn"
+              onclick="triggerSync()">⚡ Синхронизировать сейчас</button>
+      {% endif %}
 
-      <div class="form-group">
-        <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
-          <input type="checkbox" name="sync_on_startup"
-                 {{ 'checked' if settings.sync_on_startup == '1' }}
-                 style="width:16px;height:16px">
-          <span>Синхронизировать при запуске</span>
-        </label>
-      </div>
+      <form method="post" action="{{ url_for('settings') }}">
+        <div class="form-group">
+          <label class="form-label">Интервал автосинхронизации</label>
+          <select name="sync_interval_hours" class="form-control">
+            {% for h in ['1','2','4','8','24'] %}
+              <option value="{{ h }}" {{ 'selected' if settings.sync_interval_hours == h }}>{{ h }} ч.</option>
+            {% endfor %}
+          </select>
+        </div>
 
-      <div class="form-group" style="color:var(--text-muted);font-size:12px">
-        Версия приложения: {{ settings.app_version }}
-      </div>
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+            <input type="checkbox" name="sync_on_startup"
+                   {{ 'checked' if settings.sync_on_startup == '1' }}
+                   style="width:16px;height:16px">
+            <span>Синхронизировать при запуске</span>
+          </label>
+        </div>
 
-      <button type="submit" class="btn btn-primary">💾 Сохранить</button>
-    </form>
+        <div class="form-group text-muted" style="font-size:12px">
+          Версия приложения: {{ settings.app_version }}
+        </div>
+
+        <button type="submit" class="btn btn-primary">💾 Сохранить</button>
+      </form>
+    </div>
   </div>
+
+  <!-- ===== Backup ===== -->
+  <div class="card">
+    <div class="card-header"><h2>💾 Резервная копия</h2></div>
+    <div class="card-body">
+      <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px">
+        Создаёт ZIP-архив со всей базой данных и файлами вложений.
+        Храните копии в безопасном месте.
+      </p>
+      <a href="{{ url_for('export_backup') }}" class="btn btn-primary btn-lg" style="width:100%;text-align:center">
+        📦 Создать резервную копию
+      </a>
+      <div class="text-muted mt-2" style="font-size:12px;text-align:center">
+        Файл: backup_YYYYMMDD_HHMMSS.zip
+      </div>
+    </div>
+  </div>
+
 </div>
 
+<!-- ===== Failed SOY cases warning ===== -->
+{% if failed_soy %}
+<div class="card mt-3 border-orange">
+  <div class="card-header">
+    <h2>⚠ Проблемы автообновления СОЮ</h2>
+  </div>
+  <div class="card-body">
+    {% for c in failed_soy %}
+    <div class="deadline-item urgency-warn">
+      <span class="dl-date">{{ c['soy_scrape_attempts'] }} попыток</span>
+      <div class="dl-title">
+        <a href="{{ url_for('case_detail', case_id=c['id']) }}">{{ c['case_number'] }}</a>
+        — статус: {{ c['soy_scrape_status'] or '—' }}
+      </div>
+      <div class="dl-meta">{{ c['soy_scrape_error_msg'] or '' }}</div>
+    </div>
+    {% endfor %}
+    <div class="text-muted mt-2" style="font-size:13px">
+      Автообновление для этих дел недоступно. Проверьте ссылки на сайт суда или обновите вручную.
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function triggerSync() {
+  var btn = document.getElementById('sync-now-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Запускаю…';
+  fetch('/api/sync/trigger', {method: 'POST'})
+    .then(r => r.json())
+    .then(function(d) {
+      btn.textContent = '✓ Запущено';
+      setTimeout(function() {
+        btn.disabled = false;
+        btn.textContent = '⚡ Синхронизировать сейчас';
+      }, 3000);
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.textContent = '⚡ Синхронизировать сейчас';
+    });
+}
+</script>
 {% endblock %}

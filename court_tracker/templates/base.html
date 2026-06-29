@@ -50,12 +50,12 @@
     </nav>
 
     <div class="sidebar-bottom">
-      <button class="bell-btn" onclick="window.location='{{ url_for('api_notifications') }}'">
+      <button class="bell-btn" id="bell-btn" onclick="window.location='{{ url_for('api_notifications') }}'">
         <span>🔔</span>
         <span>Уведомления</span>
-        {% if unread_count > 0 %}
-          <span class="badge">{{ unread_count }}</span>
-        {% endif %}
+        <span class="badge" id="bell-badge" style="{{ '' if unread_count > 0 else 'display:none' }}">
+          {{ unread_count }}
+        </span>
       </button>
     </div>
   </aside>
@@ -117,6 +117,24 @@
       });
     });
   });
+
+  // Poll notifications every 60 s and update bell badge
+  (function pollNotifications() {
+    setTimeout(function tick() {
+      fetch('/api/notifications')
+        .then(r => r.json())
+        .then(function(data) {
+          var badge = document.getElementById('bell-badge');
+          if (badge) {
+            var count = Array.isArray(data) ? data.length : 0;
+            badge.textContent = count;
+            badge.style.display = count > 0 ? '' : 'none';
+          }
+        })
+        .catch(function() {})
+        .finally(function() { setTimeout(tick, 60000); });
+    }, 60000);
+  })();
 </script>
 {% block scripts %}{% endblock %}
 </body>

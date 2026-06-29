@@ -1016,3 +1016,153 @@ def get_calendar_events(conn: sqlite3.Connection, year: int, month: int) -> dict
         })
 
     return {"year": year, "month": month, "days": days}
+
+
+# ---------------------------------------------------------------------------
+# Export helpers (Phase 7)
+# ---------------------------------------------------------------------------
+
+def get_all_cases_for_export(conn: sqlite3.Connection) -> list[dict]:
+    cur = conn.execute(
+        """SELECT c.*, cl.name AS client_name
+           FROM cases c
+           LEFT JOIN clients cl ON cl.id = c.client_id
+           ORDER BY c.created_at DESC"""
+    )
+    return _rows(cur)
+
+
+def get_future_events_for_export(conn: sqlite3.Connection) -> list[dict]:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    cur = conn.execute(
+        """SELECT e.*, c.case_number, c.court
+           FROM events e
+           JOIN cases c ON c.id = e.case_id
+           WHERE e.event_date >= ?
+           ORDER BY e.event_date""",
+        (today,),
+    )
+    return _rows(cur)
+
+
+def get_open_deadlines_for_export(conn: sqlite3.Connection) -> list[dict]:
+    cur = conn.execute(
+        """SELECT d.*, c.case_number, c.court
+           FROM deadlines d
+           JOIN cases c ON c.id = d.case_id
+           WHERE d.is_done = 0
+           ORDER BY d.deadline_date""",
+    )
+    return _rows(cur)
+
+
+def get_notes_for_report(conn: sqlite3.Connection, case_id: int) -> list[dict]:
+    cur = conn.execute(
+        "SELECT * FROM notes_and_tasks WHERE case_id=? ORDER BY position",
+        (case_id,),
+    )
+    notes = _rows(cur)
+    for note in notes:
+        cur2 = conn.execute(
+            "SELECT * FROM checklist_items WHERE note_id=? ORDER BY position",
+            (note["id"],),
+        )
+        note["checklist"] = _rows(cur2)
+    return notes
+
+
+# ---------------------------------------------------------------------------
+# SOY sync helpers (Phase 7)
+# ---------------------------------------------------------------------------
+
+def get_soy_cases_for_sync(conn: sqlite3.Connection) -> list[dict]:
+    cur = conn.execute(
+        """SELECT * FROM cases
+           WHERE source='soy' AND soy_scraping_enabled=1
+             AND (soy_url_first IS NOT NULL OR soy_url_appeal IS NOT NULL
+                  OR soy_url_cassation IS NOT NULL)"""
+    )
+    return _rows(cur)
+
+
+def upsert_case_field(conn: sqlite3.Connection, case_id: int,
+                      field: str, value) -> None:
+    safe_fields = {
+        "judge", "status", "court", "last_synced_at",
+        "soy_scrape_status", "soy_scrape_last_ok",
+        "soy_scrape_error_msg", "soy_scrape_attempts",
+        "soy_scraping_enabled",
+    }
+    if field not in safe_fields:
+        return
+    conn.execute(f"UPDATE cases SET {field}=?, updated_at=datetime('now') WHERE id=?",
+                 (value, case_id))
+    conn.commit()
+
+
+def update_soy_scrape_status(conn: sqlite3.Connection, case_id: int,
+                              status: str, error_msg: Optional[str] = None) -> None:
+    now = _now()
+    if status == "success":
+        conn.execute(
+            """UPDATE cases SET soy_scrape_status=?, soy_scrape_last_ok=?,
+               soy_scrape_error_msg=NULL, soy_scrape_attempts=0,
+               last_synced_at=?, updated_at=? WHERE id=?""",
+            (status, now, now, now, case_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE cases SET soy_scrape_status=?,
+               soy_scrape_error_msg=?,
+               soy_scrape_attempts=soy_scrape_attempts+1,
+               updated_at=? WHERE id=?""",
+            (status, error_msg, now, case_id),
+        )
+    conn.commit()
+
+
+def get_failed_soy_cases(conn: sqlite3.Connection, min_attempts: int = 5) -> list[dict]:
+    cur = conn.execute(
+        """SELECT c.id, c.case_number, c.soy_scrape_status, c.soy_scrape_attempts,
+                  c.soy_scrape_error_msg
+           FROM cases c
+           WHERE c.source='soy' AND c.soy_scraping_enabled=1
+             AND c.soy_scrape_attempts >= ?
+           ORDER BY c.soy_scrape_attempts DESC""",
+        (min_attempts,),
+    )
+    return _rows(cur)
+
+
+# ---------------------------------------------------------------------------
+# Notifications (Phase 7)
+# ---------------------------------------------------------------------------
+
+def create_notification(conn: sqlite3.Connection, case_id: Optional[int],
+                        notif_type: str, message: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO notifications(case_id, type, message) VALUES (?,?,?)",
+        (case_id, notif_type, message),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_notifications(conn: sqlite3.Connection, limit: int = 30) -> list[dict]:
+    cur = conn.execute(
+        """SELECT n.*, c.case_number FROM notifications n
+           LEFT JOIN cases c ON c.id = n.case_id
+           ORDER BY n.created_at DESC LIMIT ?""",
+        (limit,),
+    )
+    return _rows(cur)
+
+
+def mark_notification_read(conn: sqlite3.Connection, notif_id: int) -> None:
+    conn.execute("UPDATE notifications SET is_read=1 WHERE id=?", (notif_id,))
+    conn.commit()
+
+
+def mark_all_notifications_read(conn: sqlite3.Connection) -> None:
+    conn.execute("UPDATE notifications SET is_read=1")
+    conn.commit()

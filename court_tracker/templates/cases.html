@@ -2,6 +2,7 @@
 {% block title %}Дела{% endblock %}
 {% block page_title %}Все дела{% endblock %}
 {% block topbar_actions %}
+  <a href="{{ url_for('export_cases_xlsx') }}" class="btn btn-secondary btn-sm">📥 Скачать Excel</a>
   <a href="{{ url_for('case_add') }}" class="btn btn-primary btn-sm">+ Добавить дело</a>
 {% endblock %}
 

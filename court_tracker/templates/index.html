@@ -172,6 +172,27 @@
 </div>
 {% endif %}
 
+<!-- ===== SOY failure warnings ===== -->
+{% if failed_soy %}
+<div class="card mt-3 border-orange">
+  <div class="card-header">
+    <h2>⚠ Внимание: проблемы автообновления</h2>
+  </div>
+  <div class="card-body">
+    {% for c in failed_soy %}
+      <div class="deadline-item urgency-warn">
+        <span class="dl-date">{{ c['soy_scrape_attempts'] }} попыток</span>
+        <div class="dl-title">
+          <a href="{{ url_for('case_detail', case_id=c['id']) }}">{{ c['case_number'] }}</a>
+          — Автообновление отключено для дела. Проверьте ссылку или обновите вручную.
+        </div>
+        <div class="dl-meta">{{ c['soy_scrape_error_msg'] or c['soy_scrape_status'] or '' }}</div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- ===== Recent sync log ===== -->
 <div class="card mt-3">
   <div class="card-header">

@@ -90,6 +90,11 @@ def create_app() -> Flask:
 
     app.teardown_appcontext(_close_db)
 
+    # Scheduler (Phase 7)
+    from court_tracker.scraper.scheduler import SyncScheduler
+    scheduler = SyncScheduler()
+    app.extensions["scheduler"] = scheduler
+
     # Startup sync
     @app.before_request
     def _ensure_db():
@@ -97,9 +102,10 @@ def create_app() -> Flask:
 
     with app.app_context():
         conn = _get_db()
+        interval_h = float(queries.get_setting(conn, "sync_interval_hours") or 2)
+        scheduler.update_interval(interval_h)
         if queries.get_setting(conn, "sync_on_startup") == "1":
-            t = threading.Thread(target=_background_sync, args=(app,), daemon=True)
-            t.start()
+            scheduler.start(delay_seconds=5)
 
     # ------------------------------------------------------------------
     # Template helpers
@@ -179,6 +185,7 @@ def create_app() -> Flask:
         )
 
         fin = queries.get_dashboard_financials(conn)
+        failed_soy = queries.get_failed_soy_cases(conn)
         return render_template(
             "index.html",
             total_active=len(active),
@@ -192,6 +199,7 @@ def create_app() -> Flask:
             kanban_counts=kanban_counts,
             total_active_claims=fin["total_active_claims"],
             fee_receivable=fin["fee_receivable"],
+            failed_soy=failed_soy,
         )
 
     # ------------------------------------------------------------------
@@ -342,9 +350,13 @@ def create_app() -> Flask:
     @app.route("/settings", methods=["GET", "POST"])
     def settings():
         conn = _get_db()
+        sched = app.extensions.get("scheduler")
         if request.method == "POST":
-            queries.set_setting(conn, "sync_interval_hours", request.form.get("sync_interval_hours", "2"))
+            new_interval = request.form.get("sync_interval_hours", "2")
+            queries.set_setting(conn, "sync_interval_hours", new_interval)
             queries.set_setting(conn, "sync_on_startup", "1" if request.form.get("sync_on_startup") else "0")
+            if sched:
+                sched.update_interval(float(new_interval))
             flash("Настройки сохранены.", "success")
             return redirect(url_for("settings"))
         current = {
@@ -352,7 +364,10 @@ def create_app() -> Flask:
             "sync_on_startup": queries.get_setting(conn, "sync_on_startup", "1"),
             "app_version": queries.get_setting(conn, "app_version", "2.0"),
         }
-        return render_template("settings.html", settings=current)
+        sync_status = sched.get_status() if sched else {}
+        failed_soy = queries.get_failed_soy_cases(conn)
+        return render_template("settings.html", settings=current,
+                               sync_status=sync_status, failed_soy=failed_soy)
 
     # ------------------------------------------------------------------
     # JSON API
@@ -419,12 +434,11 @@ def create_app() -> Flask:
             queries.log_sync(conn, case_id, False, str(exc))
             return jsonify({"success": False, "message": str(exc)}), 500
 
-    @app.route("/api/sync/status")
-    def api_sync_status():
+    @app.route("/api/sync/status/legacy")
+    def api_sync_status_legacy():
         conn = _get_db()
         return jsonify({
             "last_sync": _sync_state["last_sync"],
-            "next_sync": None,
             "is_running": _sync_state["is_running"],
             "cases_count": conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0],
         })
@@ -969,6 +983,336 @@ def create_app() -> Flask:
         except OSError:
             pass
         return jsonify({"success": True})
+
+    # ------------------------------------------------------------------
+    # Export (Phase 7)
+    # ------------------------------------------------------------------
+
+    @app.route("/export/cases.xlsx")
+    def export_cases_xlsx():
+        import io
+        from flask import send_file as _sf
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        conn = _get_db()
+        cases    = queries.get_all_cases_for_export(conn)
+        future_ev = queries.get_future_events_for_export(conn)
+        open_dl  = queries.get_open_deadlines_for_export(conn)
+
+        wb = openpyxl.Workbook()
+
+        # ── Sheet 1: Cases ────────────────────────────────────────────────
+        ws1 = wb.active
+        ws1.title = "Реестр дел"
+        hdr_fill = PatternFill("solid", fgColor="2B4EFF")
+        hdr_font = Font(color="FFFFFF", bold=True)
+        headers1 = [
+            "ID", "Номер дела", "Суд", "Судья", "Статус", "Тип дела", "Источник",
+            "Начало", "Клиент", "Сумма иска", "Взыскано", "Итог",
+            "URL КАД", "Обновлено",
+        ]
+        for col, h in enumerate(headers1, 1):
+            cell = ws1.cell(row=1, column=col, value=h)
+            cell.font = hdr_font
+            cell.fill = hdr_fill
+            cell.alignment = Alignment(horizontal="center")
+        for r, c in enumerate(cases, 2):
+            ws1.append([
+                c["id"], c["case_number"], c["court"], c["judge"], c["status"],
+                c["case_type"], c["source"], c["start_date"],
+                c.get("client_name"), c.get("claim_amount"), c.get("awarded_amount"),
+                c.get("outcome"), c.get("kad_url"), (c["updated_at"] or "")[:16],
+            ])
+        for col in ws1.columns:
+            max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+            ws1.column_dimensions[col[0].column_letter].width = min(max_len + 2, 50)
+
+        # ── Sheet 2: Future events ─────────────────────────────────────────
+        ws2 = wb.create_sheet("Заседания")
+        headers2 = ["Дата", "Тип", "Суд", "Номер дела", "Описание"]
+        for col, h in enumerate(headers2, 1):
+            cell = ws2.cell(row=1, column=col, value=h)
+            cell.font = Font(bold=True)
+        for ev in future_ev:
+            ws2.append([
+                ev["event_date"], ev["event_type"],
+                ev.get("court"), ev["case_number"],
+                ev.get("description"),
+            ])
+        for col in ws2.columns:
+            ws2.column_dimensions[col[0].column_letter].width = 30
+
+        # ── Sheet 3: Open deadlines ────────────────────────────────────────
+        ws3 = wb.create_sheet("Сроки")
+        headers3 = ["Срок до", "Тип срока", "Номер дела", "Суд", "Статья", "Примечание"]
+        for col, h in enumerate(headers3, 1):
+            cell = ws3.cell(row=1, column=col, value=h)
+            cell.font = Font(bold=True)
+        for dl in open_dl:
+            ws3.append([
+                dl["deadline_date"], dl["deadline_type"],
+                dl["case_number"], dl.get("court"),
+                dl.get("statute_article"), dl.get("calculation_note"),
+            ])
+        for col in ws3.columns:
+            ws3.column_dimensions[col[0].column_letter].width = 30
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return _sf(buf, as_attachment=True,
+                   download_name="cases_export.xlsx",
+                   mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    @app.route("/export/cases/<int:case_id>/report.docx")
+    def export_case_report(case_id: int):
+        import io
+        from flask import send_file as _sf
+        from docx import Document as _Doc
+        from docx.shared import Pt, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        conn = _get_db()
+        case = queries.get_case_full(conn, case_id)
+        if not case:
+            return "Дело не найдено", 404
+
+        client_name = ""
+        if case.get("client_id"):
+            row = conn.execute("SELECT name FROM clients WHERE id=?", (case["client_id"],)).fetchone()
+            if row:
+                client_name = row[0]
+
+        notes = queries.get_notes_for_report(conn, case_id)
+
+        doc = _Doc()
+        style = doc.styles["Normal"]
+        style.font.name = "Arial"
+        style.font.size = Pt(11)
+
+        # Title
+        title = doc.add_heading(f"Отчёт по делу {case.get('case_number', '')}", level=0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # Section helper
+        def _section(name):
+            h = doc.add_heading(name, level=1)
+            h.runs[0].font.color.rgb = RGBColor(0x2B, 0x4E, 0xFF)
+
+        def _table_row(table, label, value):
+            row = table.add_row()
+            row.cells[0].text = label
+            row.cells[1].text = str(value or "—")
+            row.cells[0].paragraphs[0].runs[0].bold = True
+
+        # Section 1: General info
+        _section("Общие сведения")
+        t = doc.add_table(rows=0, cols=2)
+        t.style = "Table Grid"
+        for label, val in [
+            ("Суд",           case.get("court")),
+            ("Судья",         case.get("judge")),
+            ("Статус",        case.get("status")),
+            ("Тип дела",      case.get("case_type")),
+            ("Дата начала",   case.get("start_date")),
+            ("Клиент",        client_name),
+            ("Сумма иска",    case.get("claim_amount")),
+            ("Взыскано",      case.get("awarded_amount")),
+            ("Итог",          case.get("outcome")),
+        ]:
+            _table_row(t, label, val)
+        doc.add_paragraph()
+
+        # Section 2: Participants
+        _section("Участники")
+        parts = case.get("participants", [])
+        if parts:
+            t2 = doc.add_table(rows=1, cols=4)
+            t2.style = "Table Grid"
+            for i, h in enumerate(["Роль", "Наименование", "ИНН", "Адрес"]):
+                t2.rows[0].cells[i].text = h
+                t2.rows[0].cells[i].paragraphs[0].runs[0].bold = True
+            for p in parts:
+                row = t2.add_row()
+                row.cells[0].text = p.get("role") or ""
+                row.cells[1].text = p.get("name") or ""
+                row.cells[2].text = p.get("inn") or ""
+                row.cells[3].text = p.get("address") or ""
+        else:
+            doc.add_paragraph("Участники не указаны.")
+        doc.add_paragraph()
+
+        # Section 3: Events
+        _section("Хронология событий")
+        events = sorted(case.get("events", []), key=lambda e: e.get("event_date") or "")
+        if events:
+            t3 = doc.add_table(rows=1, cols=3)
+            t3.style = "Table Grid"
+            for i, h in enumerate(["Дата", "Тип", "Описание"]):
+                t3.rows[0].cells[i].text = h
+                t3.rows[0].cells[i].paragraphs[0].runs[0].bold = True
+            for ev in events:
+                row = t3.add_row()
+                row.cells[0].text = ev.get("event_date") or ""
+                row.cells[1].text = ev.get("event_type") or ""
+                row.cells[2].text = ev.get("description") or ""
+        else:
+            doc.add_paragraph("События не найдены.")
+        doc.add_paragraph()
+
+        # Section 4: Deadlines
+        _section("Процессуальные сроки")
+        deadlines = sorted(case.get("deadlines", []), key=lambda d: d.get("deadline_date") or "")
+        if deadlines:
+            t4 = doc.add_table(rows=1, cols=4)
+            t4.style = "Table Grid"
+            for i, h in enumerate(["Срок", "Дата", "Статья", "Выполнен"]):
+                t4.rows[0].cells[i].text = h
+                t4.rows[0].cells[i].paragraphs[0].runs[0].bold = True
+            for dl in deadlines:
+                row = t4.add_row()
+                row.cells[0].text = dl.get("deadline_type") or ""
+                row.cells[1].text = dl.get("deadline_date") or ""
+                row.cells[2].text = dl.get("statute_article") or ""
+                row.cells[3].text = "Да" if dl.get("is_done") else "Нет"
+        else:
+            doc.add_paragraph("Сроки не указаны.")
+        doc.add_paragraph()
+
+        # Section 5: Notes
+        plain_notes = [n for n in notes if n.get("item_type") != "task"]
+        if plain_notes:
+            _section("Заметки")
+            for n in plain_notes:
+                doc.add_heading(n.get("title") or "Заметка", level=2)
+                if n.get("body"):
+                    doc.add_paragraph(n["body"])
+                for ci in n.get("checklist", []):
+                    mark = "☑" if ci.get("checked") else "☐"
+                    doc.add_paragraph(f"{mark} {ci.get('text', '')}", style="List Bullet")
+            doc.add_paragraph()
+
+        # Section 6: Completed tasks
+        done_tasks = [n for n in notes if n.get("item_type") == "task" and n.get("task_status") == "done"]
+        if done_tasks:
+            _section("Выполненные мероприятия")
+            for tk in done_tasks:
+                doc.add_paragraph(
+                    f"✔ {tk.get('title') or 'Задача'}  "
+                    f"(приоритет: {tk.get('task_priority', '')}, "
+                    f"дедлайн: {tk.get('task_due_date') or '—'})",
+                    style="List Bullet",
+                )
+            doc.add_paragraph()
+
+        # Footer
+        doc.add_paragraph(
+            f"Сформировано: {datetime.utcnow().strftime('%d.%m.%Y %H:%M')} UTC"
+        ).alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        safe_num = (case.get("case_number") or "case").replace("/", "-")
+        return _sf(buf, as_attachment=True,
+                   download_name=f"report_{safe_num}.docx",
+                   mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    @app.route("/export/backup.zip")
+    def export_backup():
+        import io, shutil, zipfile
+        from flask import send_file as _sf
+        from court_tracker.config import DATA_DIR
+
+        conn = _get_db()
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            db_path = DATA_DIR / "court_tracker.db"
+            if db_path.exists():
+                zf.write(str(db_path), f"backup_{ts}/court_tracker.db")
+            att_dir = DATA_DIR / "attachments"
+            if att_dir.exists():
+                for att_file in att_dir.rglob("*"):
+                    if att_file.is_file():
+                        zf.write(str(att_file),
+                                 f"backup_{ts}/attachments/{att_file.name}")
+        buf.seek(0)
+        queries.log_sync(conn, None, True, f"Backup created: backup_{ts}.zip")
+        return _sf(buf, as_attachment=True,
+                   download_name=f"backup_{ts}.zip",
+                   mimetype="application/zip")
+
+    # ------------------------------------------------------------------
+    # SOY scraping API (Phase 7)
+    # ------------------------------------------------------------------
+
+    @app.route("/api/cases/<int:case_id>/soy-sync", methods=["POST"])
+    def api_soy_sync(case_id: int):
+        conn = _get_db()
+        case = queries.get_case_full(conn, case_id)
+        if not case:
+            return jsonify({"success": False, "error": "not found"}), 404
+
+        url = (case.get("soy_url_cassation")
+               or case.get("soy_url_appeal")
+               or case.get("soy_url_first"))
+        if not url:
+            return jsonify({"success": False, "error": "no SOY URL configured"}), 400
+
+        from court_tracker.scraper.soy_scraper import SOYScraper
+        scraper = SOYScraper(headless=True)
+        result = scraper.scrape_case(url)
+
+        if result["success"]:
+            queries.save_events(conn, case_id, result["events"])
+            ci = result.get("case_info") or {}
+            if ci.get("judge"):
+                queries.upsert_case_field(conn, case_id, "judge", ci["judge"])
+            if result.get("participants"):
+                queries.save_participants(conn, case_id, result["participants"])
+            queries.update_soy_scrape_status(conn, case_id, "success")
+            queries.log_sync(conn, case_id, True, "manual СОЮ sync")
+            return jsonify({"success": True, "status": "success",
+                            "message": "Данные успешно обновлены",
+                            "events_count": len(result["events"])})
+        else:
+            queries.update_soy_scrape_status(conn, case_id,
+                                             result["status"], result.get("error_msg"))
+            queries.log_sync(conn, case_id, False, result.get("error_msg", ""))
+            return jsonify({"success": False, "status": result["status"],
+                            "message": result.get("error_msg", "Ошибка синхронизации")})
+
+    @app.route("/api/cases/<int:case_id>/soy-scraping", methods=["POST"])
+    def api_soy_toggle(case_id: int):
+        data = request.get_json(force=True, silent=True) or {}
+        enabled = bool(data.get("enabled", False))
+        conn = _get_db()
+        conn.execute(
+            "UPDATE cases SET soy_scraping_enabled=?, updated_at=datetime('now') WHERE id=?",
+            (1 if enabled else 0, case_id),
+        )
+        conn.commit()
+        return jsonify({"success": True, "enabled": enabled})
+
+    # ------------------------------------------------------------------
+    # Scheduler API (Phase 7)
+    # ------------------------------------------------------------------
+
+    @app.route("/api/sync/status")
+    def api_sync_status():
+        sched = app.extensions.get("scheduler")
+        if sched:
+            return jsonify(sched.get_status())
+        return jsonify({"is_running": False, "last_sync": None, "next_sync": None, "cases_count": 0})
+
+    @app.route("/api/sync/trigger", methods=["POST"])
+    def api_sync_trigger():
+        sched = app.extensions.get("scheduler")
+        if sched:
+            sched.trigger_now()
+        return jsonify({"success": True, "message": "Синхронизация запущена"})
 
     # ------------------------------------------------------------------
     # Analytics (Phase 6)

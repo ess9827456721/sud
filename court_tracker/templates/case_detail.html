@@ -3,6 +3,7 @@
 {% block page_title %}Карточка дела{% endblock %}
 {% block topbar_actions %}
   <a href="{{ url_for('cases_list') }}" class="btn btn-secondary btn-sm">← Все дела</a>
+  <a href="{{ url_for('export_case_report', case_id=case['id']) }}" class="btn btn-secondary btn-sm">📄 Скачать Word</a>
   {% if case['source'] == 'kad' and case['kad_url'] %}
     <form method="post" action="{{ url_for('case_sync', case_id=case['id']) }}" style="display:inline">
       <button type="submit" class="btn btn-primary btn-sm">🔄 Синхронизировать</button>
@@ -124,19 +125,40 @@
         <span id="client-save-indicator" class="autosave-indicator">✓</span>
       </div>
       {% if case['source'] == 'soy' %}
+        {% set soy_status = case['soy_scrape_status'] or 'pending' %}
+        {% set soy_map = {
+          'success': ('green',  '✓', 'Данные актуальны'),
+          'pending': ('gray',   '○', 'Ещё не синхронизировалось'),
+          'failed':  ('red',    '✗', 'Шаблон суда не распознан'),
+          'captcha': ('orange', '!', 'Требуется капча на сайте суда'),
+          'no_data': ('orange', '?', 'Движение дела не найдено'),
+          'manual':  ('gray',   '—', 'Автообновление отключено'),
+        } %}
+        {% set sc, si, st = soy_map.get(soy_status, ('gray','○','Неизвестно')) %}
         <div class="form-group">
           <label class="form-label">Автопарсинг СОЮ</label>
-          <select class="form-control" data-autosave="cases:{{ case['id'] }}:soy_scraping_enabled">
-            <option value="1" {{ 'selected' if case['soy_scraping_enabled'] == 1 }}>Включён</option>
-            <option value="0" {{ 'selected' if case['soy_scraping_enabled'] == 0 }}>Выключен</option>
-          </select>
-          <span class="autosave-indicator">✓</span>
-          {% if case['soy_scrape_status'] %}
-            <div class="text-small text-muted mt-1">
-              Статус: {{ case['soy_scrape_status'] }}
-              {% if case['soy_scrape_last_ok'] %} · Последний OK: {{ case['soy_scrape_last_ok'][:16] }}{% endif %}
-              {% if case['soy_scrape_attempts'] %} · Попыток: {{ case['soy_scrape_attempts'] }}{% endif %}
-            </div>
+          <div class="soy-sync-status">
+            <span class="sync-indicator sync-{{ sc }}">{{ si }}</span>
+            <span class="sync-label">{{ st }}</span>
+            {% if case['soy_scrape_last_ok'] %}
+              <span class="sync-date">Обновлено: {{ case['soy_scrape_last_ok'][:16] }}</span>
+            {% endif %}
+            {% if case['soy_scrape_attempts'] %}
+              <span class="text-muted text-small">Попыток: {{ case['soy_scrape_attempts'] }}</span>
+            {% endif %}
+          </div>
+          <div class="soy-sync-controls mt-1">
+            <button type="button" class="btn btn-secondary btn-sm"
+                    onclick="syncSoyNow({{ case['id'] }})">🔄 Обновить сейчас</button>
+            <label class="soy-auto-label">
+              <input type="checkbox" id="soy-auto-cb"
+                     {{ 'checked' if case['soy_scraping_enabled'] }}
+                     onchange="toggleSoySync({{ case['id'] }}, this.checked)">
+              Автообновление
+            </label>
+          </div>
+          {% if case['soy_scrape_error_msg'] %}
+            <div class="text-small text-orange mt-1">{{ case['soy_scrape_error_msg'][:120] }}</div>
           {% endif %}
         </div>
       {% endif %}
@@ -718,4 +740,33 @@
     border: 1px solid #BEE3F8;
   }
 </style>
+<script>
+function syncSoyNow(caseId) {
+  var btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ Синхронизация…';
+  fetch('/api/cases/' + caseId + '/soy-sync', {method: 'POST'})
+    .then(r => r.json())
+    .then(function(d) {
+      btn.disabled = false;
+      btn.textContent = '🔄 Обновить сейчас';
+      alert(d.success
+        ? '✓ Обновлено. Событий: ' + (d.events_count || 0)
+        : '✗ ' + (d.message || 'Ошибка'));
+      if (d.success) location.reload();
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.textContent = '🔄 Обновить сейчас';
+      alert('Ошибка соединения');
+    });
+}
+function toggleSoySync(caseId, enabled) {
+  fetch('/api/cases/' + caseId + '/soy-scraping', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: enabled})
+  });
+}
+</script>
 {% endblock %}
