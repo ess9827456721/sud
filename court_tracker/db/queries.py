@@ -477,58 +477,6 @@ def get_expiring_powers_of_attorney(conn: sqlite3.Connection, days: int = 30) ->
 
 
 # ---------------------------------------------------------------------------
-# SOY sync helpers
-# ---------------------------------------------------------------------------
-
-def get_soy_cases_for_sync(conn: sqlite3.Connection) -> list[dict]:
-    cur = conn.execute(
-        """SELECT * FROM cases
-           WHERE source = 'soy'
-             AND soy_scraping_enabled = 1
-             AND soy_scrape_attempts < 5
-           ORDER BY soy_scrape_last_ok ASC""",
-    )
-    return _rows(cur)
-
-
-def update_soy_scrape_status(
-    conn: sqlite3.Connection,
-    case_id: int,
-    status: str,
-    error_msg: Optional[str] = None,
-) -> None:
-    now = _now()
-    if status == "success":
-        conn.execute(
-            """UPDATE cases SET
-                soy_scrape_status = 'success',
-                soy_scrape_last_ok = ?,
-                soy_scrape_attempts = 0,
-                soy_scrape_error_msg = NULL,
-                updated_at = ?
-               WHERE id = ?""",
-            (now, now, case_id),
-        )
-    else:
-        conn.execute(
-            """UPDATE cases SET
-                soy_scrape_status = ?,
-                soy_scrape_error_msg = ?,
-                soy_scrape_attempts = soy_scrape_attempts + 1,
-                updated_at = ?
-               WHERE id = ?""",
-            (status, error_msg, now, case_id),
-        )
-        # Disable scraping after 5 consecutive failures
-        conn.execute(
-            """UPDATE cases SET soy_scraping_enabled = 0
-               WHERE id = ? AND soy_scrape_attempts >= 5""",
-            (case_id,),
-        )
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
 # Sync log
 # ---------------------------------------------------------------------------
 
@@ -1179,7 +1127,8 @@ def get_soy_cases_for_sync(conn: sqlite3.Connection) -> list[dict]:
         """SELECT * FROM cases
            WHERE source='soy' AND soy_scraping_enabled=1
              AND (soy_url_first IS NOT NULL OR soy_url_appeal IS NOT NULL
-                  OR soy_url_cassation IS NOT NULL)"""
+                  OR soy_url_cassation IS NOT NULL)
+           ORDER BY soy_scrape_last_ok ASC"""
     )
     return _rows(cur)
 
@@ -1219,6 +1168,11 @@ def update_soy_scrape_status(conn: sqlite3.Connection, case_id: int,
                soy_scrape_attempts=soy_scrape_attempts+1,
                updated_at=? WHERE id=?""",
             (status, error_msg, now, case_id),
+        )
+        # Disable auto-scraping after 5 consecutive failures (spec requirement)
+        conn.execute(
+            "UPDATE cases SET soy_scraping_enabled=0 WHERE id=? AND soy_scrape_attempts>=5",
+            (case_id,),
         )
     conn.commit()
 
