@@ -30,8 +30,8 @@ function getPythonPath() {
   if (!isDev && app.isPackaged) {
     // PyInstaller bundle: the .exe IS the Python runtime
     const exeName = process.platform === 'win32'
-      ? 'СудебныйТрекер_core.exe'
-      : 'СудебныйТрекер_core';
+      ? 'SudTracker_core.exe'
+      : 'SudTracker_core';
     const bundled = path.join(process.resourcesPath, 'python_core', exeName);
     if (fs.existsSync(bundled)) return bundled;
     // Fallback: look for any executable in python_core/
