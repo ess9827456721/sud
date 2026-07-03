@@ -47,7 +47,9 @@ if __name__ == "__main__":
         except Exception:
             time.sleep(0.5)
 
-    webbrowser.open(URL)
+    # Electron sets SUD_NO_BROWSER=1 — it shows its own window instead
+    if not os.environ.get("SUD_NO_BROWSER"):
+        webbrowser.open(URL)
     print(f"Судебный Трекер запущен: {URL}")
     print("Нажмите Ctrl+C для остановки.")
     try:

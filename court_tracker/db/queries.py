@@ -33,72 +33,74 @@ def upsert_case(conn: sqlite3.Connection, data: dict) -> int:
         has_soy_url = any(data.get(f) for f in ("soy_url_first", "soy_url_appeal", "soy_url_cassation"))
         soy_enabled = 1 if (data.get("source") == "soy" and has_soy_url) else 0
 
-    existing = conn.execute(
-        "SELECT id FROM cases WHERE case_number = ?", (data["case_number"],)
-    ).fetchone()
-
     now = _now()
-    if existing:
-        case_id = existing[0]
-        conn.execute(
-            """UPDATE cases SET
-                source=COALESCE(?,source), case_id_kad=COALESCE(?,case_id_kad),
-                court=COALESCE(?,court), judge=COALESCE(?,judge),
-                status=COALESCE(?,status), case_type=COALESCE(?,case_type),
-                start_date=COALESCE(?,start_date), kad_url=COALESCE(?,kad_url),
-                soy_url_first=COALESCE(?,soy_url_first),
-                soy_url_appeal=COALESCE(?,soy_url_appeal),
-                soy_url_cassation=COALESCE(?,soy_url_cassation),
-                client_id=COALESCE(?,client_id),
-                last_synced_at=?, updated_at=?
-            WHERE id=?""",
-            (
-                data.get("source"), data.get("case_id_kad"),
-                data.get("court"), data.get("judge"),
-                data.get("status"), data.get("case_type"),
-                data.get("start_date"), data.get("kad_url"),
-                data.get("soy_url_first"), data.get("soy_url_appeal"),
-                data.get("soy_url_cassation"), data.get("client_id"),
-                now, now, case_id,
-            ),
-        )
-    else:
-        cur = conn.execute(
-            """INSERT INTO cases
-                (source, case_number, case_id_kad, court, judge, status,
-                 case_type, start_date, kad_url,
-                 soy_url_first, soy_url_appeal, soy_url_cassation,
-                 custom_label, custom_status, client_id,
-                 last_synced_at, soy_scraping_enabled, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                data.get("source", "kad"),
-                data["case_number"],
-                data.get("case_id_kad"),
-                data.get("court"),
-                data.get("judge"),
-                data.get("status"),
-                data.get("case_type"),
-                data.get("start_date"),
-                data.get("kad_url"),
-                data.get("soy_url_first"),
-                data.get("soy_url_appeal"),
-                data.get("soy_url_cassation"),
-                data.get("custom_label"),
-                data.get("custom_status"),
-                data.get("client_id"),
-                now,
-                soy_enabled,
-                now,
-                now,
-            ),
-        )
-        case_id = cur.lastrowid
-        # Create default kanban stage
-        conn.execute(
-            "INSERT OR IGNORE INTO kanban_stage(case_id, stage) VALUES (?, 'first')",
-            (case_id,),
-        )
+
+    # INSERT OR IGNORE — silent no-op if case_number already exists
+    conn.execute(
+        """INSERT OR IGNORE INTO cases
+            (source, case_number, case_id_kad, court, judge, status,
+             case_type, start_date, kad_url,
+             soy_url_first, soy_url_appeal, soy_url_cassation,
+             custom_label, custom_status, client_id,
+             last_synced_at, soy_scraping_enabled, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            data.get("source", "kad"),
+            data["case_number"],
+            data.get("case_id_kad"),
+            data.get("court"),
+            data.get("judge"),
+            data.get("status"),
+            data.get("case_type"),
+            data.get("start_date"),
+            data.get("kad_url"),
+            data.get("soy_url_first"),
+            data.get("soy_url_appeal"),
+            data.get("soy_url_cassation"),
+            data.get("custom_label"),
+            data.get("custom_status"),
+            data.get("client_id"),
+            now,
+            soy_enabled,
+            now,
+            now,
+        ),
+    )
+
+    # Always UPDATE non-key fields so re-adding the same case refreshes data
+    conn.execute(
+        """UPDATE cases SET
+            source=COALESCE(?,source), case_id_kad=COALESCE(?,case_id_kad),
+            court=COALESCE(?,court), judge=COALESCE(?,judge),
+            status=COALESCE(?,status), case_type=COALESCE(?,case_type),
+            start_date=COALESCE(?,start_date), kad_url=COALESCE(?,kad_url),
+            soy_url_first=COALESCE(?,soy_url_first),
+            soy_url_appeal=COALESCE(?,soy_url_appeal),
+            soy_url_cassation=COALESCE(?,soy_url_cassation),
+            client_id=COALESCE(?,client_id),
+            last_synced_at=?, updated_at=?
+           WHERE case_number=?""",
+        (
+            data.get("source"), data.get("case_id_kad"),
+            data.get("court"), data.get("judge"),
+            data.get("status"), data.get("case_type"),
+            data.get("start_date"), data.get("kad_url"),
+            data.get("soy_url_first"), data.get("soy_url_appeal"),
+            data.get("soy_url_cassation"), data.get("client_id"),
+            now, now, data["case_number"],
+        ),
+    )
+
+    row = conn.execute(
+        "SELECT id FROM cases WHERE case_number=?", (data["case_number"],)
+    ).fetchone()
+    case_id = row[0]
+
+    # Ensure kanban row exists
+    conn.execute(
+        "INSERT OR IGNORE INTO kanban_stage(case_id, stage) VALUES (?, 'first')",
+        (case_id,),
+    )
     conn.commit()
     return case_id
 
@@ -196,9 +198,13 @@ def save_participants(conn: sqlite3.Connection, case_id: int,
         ex = existing_map.get(key)
 
         if ex:
-            # Update only non-manual fields
+            # Update only non-manual fields, and only when the scraper
+            # actually returned a value — an empty result must not wipe
+            # data obtained on a previous run.
             updates, vals = [], []
             for field in ("name", "inn", "address", "representative"):
+                if not p.get(field):
+                    continue
                 manual_flag = f"{field}_manual"
                 # representative has no manual flag — always update
                 if field == "representative" or not ex[manual_flag]:
@@ -474,58 +480,6 @@ def get_expiring_powers_of_attorney(conn: sqlite3.Connection, days: int = 30) ->
         (today, cutoff),
     )
     return _rows(cur)
-
-
-# ---------------------------------------------------------------------------
-# SOY sync helpers
-# ---------------------------------------------------------------------------
-
-def get_soy_cases_for_sync(conn: sqlite3.Connection) -> list[dict]:
-    cur = conn.execute(
-        """SELECT * FROM cases
-           WHERE source = 'soy'
-             AND soy_scraping_enabled = 1
-             AND soy_scrape_attempts < 5
-           ORDER BY soy_scrape_last_ok ASC""",
-    )
-    return _rows(cur)
-
-
-def update_soy_scrape_status(
-    conn: sqlite3.Connection,
-    case_id: int,
-    status: str,
-    error_msg: Optional[str] = None,
-) -> None:
-    now = _now()
-    if status == "success":
-        conn.execute(
-            """UPDATE cases SET
-                soy_scrape_status = 'success',
-                soy_scrape_last_ok = ?,
-                soy_scrape_attempts = 0,
-                soy_scrape_error_msg = NULL,
-                updated_at = ?
-               WHERE id = ?""",
-            (now, now, case_id),
-        )
-    else:
-        conn.execute(
-            """UPDATE cases SET
-                soy_scrape_status = ?,
-                soy_scrape_error_msg = ?,
-                soy_scrape_attempts = soy_scrape_attempts + 1,
-                updated_at = ?
-               WHERE id = ?""",
-            (status, error_msg, now, case_id),
-        )
-        # Disable scraping after 5 consecutive failures
-        conn.execute(
-            """UPDATE cases SET soy_scraping_enabled = 0
-               WHERE id = ? AND soy_scrape_attempts >= 5""",
-            (case_id,),
-        )
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1179,7 +1133,8 @@ def get_soy_cases_for_sync(conn: sqlite3.Connection) -> list[dict]:
         """SELECT * FROM cases
            WHERE source='soy' AND soy_scraping_enabled=1
              AND (soy_url_first IS NOT NULL OR soy_url_appeal IS NOT NULL
-                  OR soy_url_cassation IS NOT NULL)"""
+                  OR soy_url_cassation IS NOT NULL)
+           ORDER BY soy_scrape_last_ok ASC"""
     )
     return _rows(cur)
 
@@ -1220,6 +1175,11 @@ def update_soy_scrape_status(conn: sqlite3.Connection, case_id: int,
                updated_at=? WHERE id=?""",
             (status, error_msg, now, case_id),
         )
+        # Disable auto-scraping after 5 consecutive failures (spec requirement)
+        conn.execute(
+            "UPDATE cases SET soy_scraping_enabled=0 WHERE id=? AND soy_scrape_attempts>=5",
+            (case_id,),
+        )
     conn.commit()
 
 
@@ -1228,8 +1188,7 @@ def get_failed_soy_cases(conn: sqlite3.Connection, min_attempts: int = 5) -> lis
         """SELECT c.id, c.case_number, c.soy_scrape_status, c.soy_scrape_attempts,
                   c.soy_scrape_error_msg
            FROM cases c
-           WHERE c.source='soy' AND c.soy_scraping_enabled=1
-             AND c.soy_scrape_attempts >= ?
+           WHERE c.source='soy' AND c.soy_scrape_attempts >= ?
            ORDER BY c.soy_scrape_attempts DESC""",
         (min_attempts,),
     )

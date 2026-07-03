@@ -251,28 +251,46 @@ def create_app() -> Flask:
                 from court_tracker.scraper.utils import normalize_case_number
                 from court_tracker.scraper.kad_scraper import KADScraper
                 case_number = normalize_case_number(case_number)
+                import sqlite3 as _sqlite3
+                try:
+                    from playwright.sync_api import TimeoutError as PWTimeoutError
+                except Exception:  # playwright not installed
+                    class PWTimeoutError(Exception):
+                        pass
                 try:
                     with KADScraper() as scraper:
                         result = scraper.search_by_case_number(case_number)
                         details = None
                         if result and result.get("kad_url"):
                             details = scraper.get_case_details(result["kad_url"])
+                    if not result:
+                        flash(f"Дело не найдено: {case_number}", "error")
+                        return render_template(
+                            "add_case.html", clients=clients, active_tab="kad",
+                            scraper_error="not found: " + case_number,
+                        )
+                    data = details if details else result
+                    data.setdefault("case_number", case_number)
+                    data.setdefault("source", "kad")
+                    case_id = queries.upsert_case(conn, data)
+                    if details:
+                        queries.save_participants(conn, case_id, details.get("participants", []))
+                        _save_events_and_deadlines(conn, case_id, details.get("events", []))
+                    queries.log_sync(conn, case_id, True, "manual add-case")
+                    flash(f"Дело {case_number} добавлено.", "success")
+                    return redirect(url_for("case_detail", case_id=case_id))
+                except PWTimeoutError as exc:
+                    flash("Сайт КАД не ответил вовремя. Попробуйте позже.", "error")
+                    return render_template("add_case.html", clients=clients, active_tab="kad",
+                                           scraper_error="Timeout: " + str(exc)[:200])
+                except _sqlite3.IntegrityError as exc:
+                    flash("Ошибка базы данных при сохранении дела.", "error")
+                    return render_template("add_case.html", clients=clients, active_tab="kad",
+                                           scraper_error="UNIQUE constraint: " + str(exc)[:200])
                 except Exception as exc:
-                    flash(f"Ошибка парсинга: {exc}", "danger")
-                    return render_template("add_case.html", clients=clients, active_tab="kad")
-                if not result:
-                    flash(f"Дело {case_number} не найдено на КАД.", "warning")
-                    return render_template("add_case.html", clients=clients, active_tab="kad")
-                data = details if details else result
-                data.setdefault("case_number", case_number)
-                data.setdefault("source", "kad")
-                case_id = queries.upsert_case(conn, data)
-                if details:
-                    queries.save_participants(conn, case_id, details.get("participants", []))
-                    _save_events_and_deadlines(conn, case_id, details.get("events", []))
-                queries.log_sync(conn, case_id, True, "manual add-case")
-                flash(f"Дело {case_number} добавлено.", "success")
-                return redirect(url_for("case_detail", case_id=case_id))
+                    flash(f"Ошибка парсинга: {exc}", "error")
+                    return render_template("add_case.html", clients=clients, active_tab="kad",
+                                           scraper_error=str(exc)[:200])
             else:
                 # SOY manual entry
                 f = request.form
@@ -298,10 +316,15 @@ def create_app() -> Flask:
                 for role, name_key in (("Истец", "plaintiff_name"), ("Ответчик", "respondent_name")):
                     name = f.get(name_key, "").strip()
                     if name:
-                        conn.execute(
-                            "INSERT INTO participants(case_id, role, name) VALUES (?,?,?)",
+                        exists = conn.execute(
+                            "SELECT 1 FROM participants WHERE case_id=? AND role=? AND name=?",
                             (case_id, role, name),
-                        )
+                        ).fetchone()
+                        if not exists:
+                            conn.execute(
+                                "INSERT INTO participants(case_id, role, name) VALUES (?,?,?)",
+                                (case_id, role, name),
+                            )
                 conn.commit()
                 flash(f"Дело {data['case_number']} добавлено (СОЮ).", "success")
                 return redirect(url_for("case_detail", case_id=case_id))
@@ -324,6 +347,13 @@ def create_app() -> Flask:
         if not case or not case.get("kad_url"):
             flash("Нет URL для синхронизации.", "warning")
             return redirect(url_for("case_detail", case_id=case_id))
+        import sqlite3 as _sqlite3
+        try:
+            from playwright.sync_api import TimeoutError as PWTimeoutError
+        except Exception:
+            class PWTimeoutError(Exception):
+                pass
+        scraper_error = None
         try:
             from court_tracker.scraper.kad_scraper import KADScraper
             with KADScraper() as scraper:
@@ -337,10 +367,25 @@ def create_app() -> Flask:
                 flash("Синхронизация выполнена.", "success")
             else:
                 queries.log_sync(conn, case_id, False, "scraper returned None")
-                flash("Ошибка синхронизации.", "danger")
+                flash("Ошибка синхронизации.", "error")
+                scraper_error = "scraper: не удалось получить данные дела"
+        except PWTimeoutError as exc:
+            queries.log_sync(conn, case_id, False, "Timeout: " + str(exc)[:200])
+            flash("Сайт КАД не ответил вовремя.", "error")
+            scraper_error = "Timeout: " + str(exc)[:200]
+        except _sqlite3.IntegrityError as exc:
+            queries.log_sync(conn, case_id, False, "IntegrityError: " + str(exc)[:200])
+            flash("Ошибка базы данных.", "error")
+            scraper_error = "UNIQUE constraint: " + str(exc)[:200]
         except Exception as exc:
-            queries.log_sync(conn, case_id, False, str(exc))
-            flash(f"Ошибка: {exc}", "danger")
+            queries.log_sync(conn, case_id, False, str(exc)[:200])
+            flash(f"Ошибка: {exc}", "error")
+            scraper_error = str(exc)[:200]
+        if scraper_error:
+            case = queries.get_case_full(conn, case_id)
+            clients = conn.execute("SELECT id, name FROM clients ORDER BY name").fetchall()
+            return render_template("case_detail.html", case=case, clients=clients,
+                                   scraper_error=scraper_error)
         return redirect(url_for("case_detail", case_id=case_id))
 
     # ------------------------------------------------------------------
@@ -387,6 +432,23 @@ def create_app() -> Flask:
         if ok:
             return jsonify({"success": True})
         return jsonify({"success": False, "error": "field not allowed or record not found"}), 400
+
+    @app.route("/api/logs/last")
+    def logs_last():
+        """Return last 100 sync_log records as plain text (used by error overlay)."""
+        conn = _get_db()
+        rows = conn.execute(
+            """SELECT sl.synced_at, sl.success, sl.message, c.case_number
+               FROM sync_log sl
+               LEFT JOIN cases c ON c.id = sl.case_id
+               ORDER BY sl.id DESC LIMIT 100"""
+        ).fetchall()
+        lines = []
+        for r in rows:
+            status = "OK" if r["success"] else "ERR"
+            case = r["case_number"] or "(общее)"
+            lines.append(f"[{r['synced_at']}] {status} {case}: {r['message']}")
+        return "\n".join(lines), 200, {"Content-Type": "text/plain; charset=utf-8"}
 
     @app.route("/api/cases")
     def api_cases():
@@ -1266,10 +1328,7 @@ def create_app() -> Flask:
         result = scraper.scrape_case(url)
 
         if result["success"]:
-            queries.save_events(conn, case_id, result["events"])
-            ci = result.get("case_info") or {}
-            if ci.get("judge"):
-                queries.upsert_case_field(conn, case_id, "judge", ci["judge"])
+            _save_events_and_deadlines(conn, case_id, result["events"])
             if result.get("participants"):
                 queries.save_participants(conn, case_id, result["participants"], smart=True)
             # Save extended case_info fields from SOY
