@@ -80,6 +80,14 @@
         {% endif %}
       {% endwith %}
 
+      {% if scraper_error %}
+      <script>
+        window.__sudScraperError = {{ scraper_error|tojson }};
+        window.dispatchEvent(new CustomEvent('app-scraper-error',
+          { detail: { message: window.__sudScraperError } }));
+      </script>
+      {% endif %}
+
       {% block content %}{% endblock %}
     </main>
   </div>

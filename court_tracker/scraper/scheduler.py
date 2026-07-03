@@ -9,9 +9,24 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from court_tracker.config import DB_PATH
+from court_tracker.config import DB_PATH, DATA_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_sync_result(new_events_count: int, errors_count: int) -> None:
+    """Write sync result to a JSON file that Electron polls for notifications."""
+    import json
+    try:
+        result = {
+            "new_events": new_events_count,
+            "errors": errors_count,
+            "timestamp": datetime.now().isoformat(),
+        }
+        notify_path = DATA_DIR / "last_sync_result.json"
+        notify_path.write_text(json.dumps(result), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Could not write last_sync_result.json: %s", exc)
 
 
 def _open_conn() -> sqlite3.Connection:
@@ -36,6 +51,8 @@ class SyncScheduler:
         self._last_sync: Optional[str] = None
         self._is_running = False
         self._cases_synced = 0
+        self._run_new_events = 0
+        self._run_errors = 0
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -108,6 +125,8 @@ class SyncScheduler:
                 return
             self._is_running = True
 
+        self._run_new_events = 0
+        self._run_errors = 0
         conn = _open_conn()
         try:
             self._sync_kad(conn)
@@ -116,10 +135,12 @@ class SyncScheduler:
             logger.info("SyncScheduler: sync complete at %s", self._last_sync)
         except Exception as exc:
             logger.error("SyncScheduler: sync error: %s", exc)
+            self._run_errors += 1
         finally:
             conn.close()
             with self._lock:
                 self._is_running = False
+            _notify_sync_result(self._run_new_events, self._run_errors)
 
     # ── KAD sync ─────────────────────────────────────────────────────────────
 
@@ -152,6 +173,7 @@ class SyncScheduler:
                     e for e in details.get("events", [])
                     if (e.get("event_date"), e.get("event_type")) not in old_events
                 ]
+                self._run_new_events += len(new_events)
                 for ev in new_events:
                     queries.create_notification(
                         conn, cid, "new_event",
@@ -170,6 +192,7 @@ class SyncScheduler:
             except Exception as exc:
                 logger.warning("KAD sync error case %s: %s", case.get("case_number"), exc)
                 queries.log_sync(conn, case["id"], False, str(exc)[:200])
+                self._run_errors += 1
 
     # ── SOY sync ─────────────────────────────────────────────────────────────
 
@@ -221,6 +244,7 @@ class SyncScheduler:
                         e for e in result["events"]
                         if (e.get("event_date"), e.get("event_type")) not in old_events
                     ]
+                    self._run_new_events += len(new_events)
                     for ev in new_events:
                         queries.create_notification(
                             conn, case["id"], "new_event",
@@ -233,6 +257,7 @@ class SyncScheduler:
                         conn, case["id"], result["status"], result.get("error_msg")
                     )
                     queries.log_sync(conn, case["id"], False, result.get("error_msg", ""))
+                    self._run_errors += 1
 
                     # Notify after 5th consecutive failure
                     attempts = (case.get("soy_scrape_attempts") or 0) + 1
@@ -246,3 +271,4 @@ class SyncScheduler:
                 logger.warning("SOY sync error case %s: %s", case.get("case_number"), exc)
                 queries.update_soy_scrape_status(conn, case["id"], "failed", str(exc)[:200])
                 queries.log_sync(conn, case["id"], False, str(exc)[:200])
+                self._run_errors += 1

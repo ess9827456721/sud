@@ -64,14 +64,12 @@
     text.style.flex = '1';
 
     const link = document.createElement('a');
-    link.textContent = 'Подробнее';
+    link.textContent = 'Открыть лог';
     link.href = '#';
     link.style.color = '#ffeeba';
     link.addEventListener('click', e => {
       e.preventDefault();
-      if (window.electronAPI) {
-        window.electronAPI.openExternal('https://github.com/ess9827456721/sud/issues');
-      }
+      window.location.href = '/api/logs/last';
     });
 
     const closeBtn = document.createElement('button');
@@ -139,4 +137,11 @@
   window.addEventListener('app-scraper-error', e => {
     showBanner((e.detail && e.detail.message) || 'scraper');
   });
+
+  // Pages dispatch the event before this overlay is injected (did-finish-load),
+  // so also pick up an error stashed by the inline template script.
+  if (window.__sudScraperError) {
+    showBanner(window.__sudScraperError);
+    window.__sudScraperError = null;
+  }
 })();

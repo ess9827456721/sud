@@ -399,10 +399,11 @@ select.form-control { cursor: pointer; }
   max-width: 320px;
   animation: slideIn .25s ease;
 }
-.flash-success { background: #F0FFF4; color: #276749; border: 1px solid #C6F6D5; }
+.flash-success { background: #F0FFF4; color: #1C4532; border: 1px solid #C6F6D5; border-left: 4px solid #276749; }
+.flash-error   { background: #FFF5F5; color: #742A2A; border: 1px solid #FED7D7; border-left: 4px solid #9B2C2C; }
 .flash-danger  { background: #FFF5F5; color: #9B2C2C; border: 1px solid #FED7D7; }
 .flash-warning { background: #FFFFF0; color: #975A16; border: 1px solid #FEFCBF; }
-.flash-info    { background: #EBF8FF; color: #2B6CB0; border: 1px solid #BEE3F8; }
+.flash-info    { background: #EBF8FF; color: #1A365D; border: 1px solid #BEE3F8; border-left: 4px solid #2B6CB0; }
 @keyframes slideIn { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* ----- Placeholder sections ---------------------------- */

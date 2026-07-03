@@ -4,7 +4,7 @@
  * manages system tray and native Windows notifications.
  */
 const { app, BrowserWindow, Tray, Menu, nativeImage,
-        ipcMain, Notification, shell, dialog } = require('electron');
+        ipcMain, Notification, shell, dialog, globalShortcut } = require('electron');
 const path   = require('path');
 const { spawn } = require('child_process');
 const http   = require('http');
@@ -117,15 +117,15 @@ function createWindow() {
     backgroundColor: '#F7FAFC',
   });
 
-  // Inject error overlay into every page after load
+  // Inject error overlay + renderer helpers into every page after load
   mainWindow.webContents.on('did-finish-load', () => {
-    try {
-      const overlayScript = fs.readFileSync(
-        path.join(__dirname, 'error_overlay.js'), 'utf8'
-      );
-      mainWindow.webContents.executeJavaScript(overlayScript).catch(() => {});
-    } catch (e) {
-      console.error('Could not inject error_overlay.js:', e.message);
+    for (const file of ['error_overlay.js', 'renderer.js']) {
+      try {
+        const script = fs.readFileSync(path.join(__dirname, file), 'utf8');
+        mainWindow.webContents.executeJavaScript(script).catch(() => {});
+      } catch (e) {
+        console.error('Could not inject ' + file + ':', e.message);
+      }
     }
   });
 
@@ -196,6 +196,37 @@ function triggerSync() {
   req.end();
 }
 
+// ── Sync-result poller ──────────────────────────────────────────────────────
+// scheduler.py writes court_tracker/data/last_sync_result.json after each
+// sync run; poll it every 60s and raise a native notification if fresh.
+
+function pollSyncResult() {
+  const notifyFile = path.join(
+    app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'),
+    'court_tracker', 'data', 'last_sync_result.json'
+  );
+  setInterval(() => {
+    try {
+      const raw  = fs.readFileSync(notifyFile, 'utf8');
+      const data = JSON.parse(raw);
+      const ts   = new Date(data.timestamp).getTime();
+      if (Date.now() - ts < 70000) {  // result is fresh (< 70s old)
+        if (data.new_events > 0) {
+          showInfoNotification(
+            'Синхронизация завершена',
+            `Новых событий: ${data.new_events}` +
+            (data.errors > 0 ? `. Ошибок: ${data.errors}` : '')
+          );
+        } else if (data.errors > 0) {
+          showErrorNotification(
+            `Синхронизация: ${data.errors} ошибок. Откройте приложение для деталей.`
+          );
+        }
+      }
+    } catch (_) {}
+  }, 60000);
+}
+
 // ── Notifications ───────────────────────────────────────────────────────────
 
 function showErrorNotification(msg) {
@@ -231,6 +262,16 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   startFlask();
+  pollSyncResult();
+
+  // F5 — reload current page
+  globalShortcut.register('F5', () => {
+    if (mainWindow) mainWindow.webContents.reload();
+  });
+  // Ctrl+Shift+D — open DevTools (for debugging)
+  globalShortcut.register('CmdOrCtrl+Shift+D', () => {
+    if (mainWindow) mainWindow.webContents.openDevTools();
+  });
 
   waitForFlask(err => {
     if (err) {
@@ -250,6 +291,8 @@ app.whenReady().then(() => {
 
 // Keep running in tray when all windows closed
 app.on('window-all-closed', () => {});
+
+app.on('will-quit', () => globalShortcut.unregisterAll());
 
 app.on('before-quit', () => {
   isQuitting = true;
