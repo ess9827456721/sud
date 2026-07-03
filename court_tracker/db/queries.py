@@ -198,9 +198,13 @@ def save_participants(conn: sqlite3.Connection, case_id: int,
         ex = existing_map.get(key)
 
         if ex:
-            # Update only non-manual fields
+            # Update only non-manual fields, and only when the scraper
+            # actually returned a value — an empty result must not wipe
+            # data obtained on a previous run.
             updates, vals = [], []
             for field in ("name", "inn", "address", "representative"):
+                if not p.get(field):
+                    continue
                 manual_flag = f"{field}_manual"
                 # representative has no manual flag — always update
                 if field == "representative" or not ex[manual_flag]:
@@ -1184,8 +1188,7 @@ def get_failed_soy_cases(conn: sqlite3.Connection, min_attempts: int = 5) -> lis
         """SELECT c.id, c.case_number, c.soy_scrape_status, c.soy_scrape_attempts,
                   c.soy_scrape_error_msg
            FROM cases c
-           WHERE c.source='soy' AND c.soy_scraping_enabled=1
-             AND c.soy_scrape_attempts >= ?
+           WHERE c.source='soy' AND c.soy_scrape_attempts >= ?
            ORDER BY c.soy_scrape_attempts DESC""",
         (min_attempts,),
     )

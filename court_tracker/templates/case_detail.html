@@ -160,6 +160,12 @@
           {% if case['soy_scrape_error_msg'] %}
             <div class="text-small text-orange mt-1">{{ case['soy_scrape_error_msg'][:120] }}</div>
           {% endif %}
+          {% if case['participants'] %}
+            {% set inn_found = case['participants'] | selectattr('inn') | rejectattr('inn_manual') | list | length %}
+            <div class="text-small text-muted mt-1">
+              ИНН участников: найдено автоматически {{ inn_found }} из {{ case['participants'] | length }}
+            </div>
+          {% endif %}
         </div>
       {% endif %}
     </div>

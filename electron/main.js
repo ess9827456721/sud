@@ -47,7 +47,7 @@ function startFlask() {
 
   flaskProc = spawn(python, [script], {
     cwd,
-    env: { ...process.env, FLASK_DEBUG: '0' },
+    env: { ...process.env, FLASK_DEBUG: '0', SUD_NO_BROWSER: '1' },
     windowsHide: true,
   });
 

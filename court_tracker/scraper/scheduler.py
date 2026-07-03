@@ -227,6 +227,11 @@ class SyncScheduler:
                         ).fetchall()
                     }
                     queries.save_events(conn, case["id"], result["events"])
+                    try:
+                        from court_tracker.services.deadline_service import auto_create_deadlines_for_case
+                        auto_create_deadlines_for_case(conn, case["id"])
+                    except Exception as exc:
+                        logger.warning("auto_create_deadlines error case %s: %s", case["id"], exc)
 
                     ci = result.get("case_info") or {}
                     if ci.get("judge"):

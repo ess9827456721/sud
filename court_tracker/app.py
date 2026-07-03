@@ -316,10 +316,15 @@ def create_app() -> Flask:
                 for role, name_key in (("Истец", "plaintiff_name"), ("Ответчик", "respondent_name")):
                     name = f.get(name_key, "").strip()
                     if name:
-                        conn.execute(
-                            "INSERT INTO participants(case_id, role, name) VALUES (?,?,?)",
+                        exists = conn.execute(
+                            "SELECT 1 FROM participants WHERE case_id=? AND role=? AND name=?",
                             (case_id, role, name),
-                        )
+                        ).fetchone()
+                        if not exists:
+                            conn.execute(
+                                "INSERT INTO participants(case_id, role, name) VALUES (?,?,?)",
+                                (case_id, role, name),
+                            )
                 conn.commit()
                 flash(f"Дело {data['case_number']} добавлено (СОЮ).", "success")
                 return redirect(url_for("case_detail", case_id=case_id))
@@ -1323,10 +1328,7 @@ def create_app() -> Flask:
         result = scraper.scrape_case(url)
 
         if result["success"]:
-            queries.save_events(conn, case_id, result["events"])
-            ci = result.get("case_info") or {}
-            if ci.get("judge"):
-                queries.upsert_case_field(conn, case_id, "judge", ci["judge"])
+            _save_events_and_deadlines(conn, case_id, result["events"])
             if result.get("participants"):
                 queries.save_participants(conn, case_id, result["participants"], smart=True)
             # Save extended case_info fields from SOY
