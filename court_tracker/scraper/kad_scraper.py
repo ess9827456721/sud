@@ -55,18 +55,31 @@ class KADScraper:
         """Search KAD for all cases involving a party with the given INN."""
         try:
             page = self._new_page()
-            page.goto(KAD_SEARCH)
-            random_delay()
-
-            # Fill INN field
-            inn_input = page.locator('input[placeholder*="ИНН"], input[name*="inn"], #PartNumInn')
-            inn_input.first.fill(inn)
-            random_delay(0.5, 1.5)
-
-            page.keyboard.press("Enter")
+            page.goto("https://kad.arbitr.ru/", wait_until="domcontentloaded")
             page.wait_for_load_state("networkidle", timeout=TIMEOUT)
-            random_delay()
+            random_delay(1, 2)
 
+            FIELD_SELECTORS = [
+                "#PartNumInn",
+                'input[placeholder*="ИНН"]',
+                'input[name*="inn"]',
+                'input[name*="Inn"]',
+            ]
+            field = self._find_visible_input(page, FIELD_SELECTORS)
+            if field is None:
+                logger.error("KAD: cannot find INN input. Selectors exhausted.")
+                return []
+
+            field.click()
+            field.fill(inn)
+            random_delay(0.5, 1.0)
+
+            submitted = self._submit_search(page)
+            if not submitted:
+                field.press("Enter")
+
+            page.wait_for_load_state("networkidle", timeout=TIMEOUT)
+            random_delay(1, 2)
             return self._parse_search_results(page)
         except Exception as exc:
             logger.error("search_by_inn(%s) failed: %s", inn, exc)
@@ -77,27 +90,73 @@ class KADScraper:
         case_number = normalize_case_number(case_number)
         try:
             page = self._new_page()
-            page.goto(KAD_SEARCH)
-            random_delay()
-
-            num_input = page.locator(
-                'input[placeholder*="номер"], input[name*="number"], #CaseNumber, input.b-form-input__input'
-            ).first
-            num_input.fill(case_number)
-            random_delay(0.5, 1.5)
-
-            search_btn = page.locator('button[type="submit"], .b-button_type_submit').first
-            search_btn.click()
+            page.goto("https://kad.arbitr.ru/", wait_until="domcontentloaded")
             page.wait_for_load_state("networkidle", timeout=TIMEOUT)
-            random_delay()
+            random_delay(1, 2)
+
+            FIELD_SELECTORS = [
+                "#CaseNumber",
+                'input[placeholder*="номер дела"]',
+                'input[placeholder*="номер"]',
+                'input[name*="CaseNumber"]',
+                'input[name*="case"]',
+                ".b-form-input__input",
+                'input[type="text"]',  # last resort
+            ]
+            field = self._find_visible_input(page, FIELD_SELECTORS)
+            if field is None:
+                logger.error("KAD: cannot find case number input. Selectors exhausted.")
+                return None
+
+            field.click()
+            field.fill(case_number)
+            random_delay(0.5, 1.0)
+
+            submitted = self._submit_search(page)
+            if not submitted:
+                field.press("Enter")
+
+            page.wait_for_load_state("networkidle", timeout=TIMEOUT)
+            random_delay(1, 2)
 
             results = self._parse_search_results(page)
-            if results:
-                return results[0]
-            return None
+            return results[0] if results else None
         except Exception as exc:
             logger.error("search_by_case_number(%s) failed: %s", case_number, exc)
             return None
+
+    # ------------------------------------------------------------------
+    # Input / button finders
+    # ------------------------------------------------------------------
+
+    def _find_visible_input(self, page, selectors: list[str]):
+        """Try selectors in order; return the first visible element or None."""
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=2000):
+                    return el
+            except Exception:
+                pass
+        return None
+
+    def _submit_search(self, page) -> bool:
+        """Try known submit-button selectors; return True if clicked."""
+        BUTTON_SELECTORS = [
+            'button[type="submit"]',
+            ".b-button_type_submit",
+            'button:has-text("Найти")',
+            'button:has-text("Поиск")',
+        ]
+        for sel in BUTTON_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=1000):
+                    btn.click()
+                    return True
+            except Exception:
+                pass
+        return False
 
     def get_case_details(self, kad_url: str) -> Optional[dict]:
         """Fetch full case details from a KAD case page."""

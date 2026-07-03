@@ -13,7 +13,7 @@ USER_AGENT = (
 )
 
 VIEWPORT = {"width": 1280, "height": 900}
-TIMEOUT = 30_000  # ms
+TIMEOUT = 45_000  # ms — increased for slow KAD responses
 
 
 def random_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:

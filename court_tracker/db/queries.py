@@ -33,72 +33,74 @@ def upsert_case(conn: sqlite3.Connection, data: dict) -> int:
         has_soy_url = any(data.get(f) for f in ("soy_url_first", "soy_url_appeal", "soy_url_cassation"))
         soy_enabled = 1 if (data.get("source") == "soy" and has_soy_url) else 0
 
-    existing = conn.execute(
-        "SELECT id FROM cases WHERE case_number = ?", (data["case_number"],)
-    ).fetchone()
-
     now = _now()
-    if existing:
-        case_id = existing[0]
-        conn.execute(
-            """UPDATE cases SET
-                source=COALESCE(?,source), case_id_kad=COALESCE(?,case_id_kad),
-                court=COALESCE(?,court), judge=COALESCE(?,judge),
-                status=COALESCE(?,status), case_type=COALESCE(?,case_type),
-                start_date=COALESCE(?,start_date), kad_url=COALESCE(?,kad_url),
-                soy_url_first=COALESCE(?,soy_url_first),
-                soy_url_appeal=COALESCE(?,soy_url_appeal),
-                soy_url_cassation=COALESCE(?,soy_url_cassation),
-                client_id=COALESCE(?,client_id),
-                last_synced_at=?, updated_at=?
-            WHERE id=?""",
-            (
-                data.get("source"), data.get("case_id_kad"),
-                data.get("court"), data.get("judge"),
-                data.get("status"), data.get("case_type"),
-                data.get("start_date"), data.get("kad_url"),
-                data.get("soy_url_first"), data.get("soy_url_appeal"),
-                data.get("soy_url_cassation"), data.get("client_id"),
-                now, now, case_id,
-            ),
-        )
-    else:
-        cur = conn.execute(
-            """INSERT INTO cases
-                (source, case_number, case_id_kad, court, judge, status,
-                 case_type, start_date, kad_url,
-                 soy_url_first, soy_url_appeal, soy_url_cassation,
-                 custom_label, custom_status, client_id,
-                 last_synced_at, soy_scraping_enabled, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                data.get("source", "kad"),
-                data["case_number"],
-                data.get("case_id_kad"),
-                data.get("court"),
-                data.get("judge"),
-                data.get("status"),
-                data.get("case_type"),
-                data.get("start_date"),
-                data.get("kad_url"),
-                data.get("soy_url_first"),
-                data.get("soy_url_appeal"),
-                data.get("soy_url_cassation"),
-                data.get("custom_label"),
-                data.get("custom_status"),
-                data.get("client_id"),
-                now,
-                soy_enabled,
-                now,
-                now,
-            ),
-        )
-        case_id = cur.lastrowid
-        # Create default kanban stage
-        conn.execute(
-            "INSERT OR IGNORE INTO kanban_stage(case_id, stage) VALUES (?, 'first')",
-            (case_id,),
-        )
+
+    # INSERT OR IGNORE — silent no-op if case_number already exists
+    conn.execute(
+        """INSERT OR IGNORE INTO cases
+            (source, case_number, case_id_kad, court, judge, status,
+             case_type, start_date, kad_url,
+             soy_url_first, soy_url_appeal, soy_url_cassation,
+             custom_label, custom_status, client_id,
+             last_synced_at, soy_scraping_enabled, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            data.get("source", "kad"),
+            data["case_number"],
+            data.get("case_id_kad"),
+            data.get("court"),
+            data.get("judge"),
+            data.get("status"),
+            data.get("case_type"),
+            data.get("start_date"),
+            data.get("kad_url"),
+            data.get("soy_url_first"),
+            data.get("soy_url_appeal"),
+            data.get("soy_url_cassation"),
+            data.get("custom_label"),
+            data.get("custom_status"),
+            data.get("client_id"),
+            now,
+            soy_enabled,
+            now,
+            now,
+        ),
+    )
+
+    # Always UPDATE non-key fields so re-adding the same case refreshes data
+    conn.execute(
+        """UPDATE cases SET
+            source=COALESCE(?,source), case_id_kad=COALESCE(?,case_id_kad),
+            court=COALESCE(?,court), judge=COALESCE(?,judge),
+            status=COALESCE(?,status), case_type=COALESCE(?,case_type),
+            start_date=COALESCE(?,start_date), kad_url=COALESCE(?,kad_url),
+            soy_url_first=COALESCE(?,soy_url_first),
+            soy_url_appeal=COALESCE(?,soy_url_appeal),
+            soy_url_cassation=COALESCE(?,soy_url_cassation),
+            client_id=COALESCE(?,client_id),
+            last_synced_at=?, updated_at=?
+           WHERE case_number=?""",
+        (
+            data.get("source"), data.get("case_id_kad"),
+            data.get("court"), data.get("judge"),
+            data.get("status"), data.get("case_type"),
+            data.get("start_date"), data.get("kad_url"),
+            data.get("soy_url_first"), data.get("soy_url_appeal"),
+            data.get("soy_url_cassation"), data.get("client_id"),
+            now, now, data["case_number"],
+        ),
+    )
+
+    row = conn.execute(
+        "SELECT id FROM cases WHERE case_number=?", (data["case_number"],)
+    ).fetchone()
+    case_id = row[0]
+
+    # Ensure kanban row exists
+    conn.execute(
+        "INSERT OR IGNORE INTO kanban_stage(case_id, stage) VALUES (?, 'first')",
+        (case_id,),
+    )
     conn.commit()
     return case_id
 

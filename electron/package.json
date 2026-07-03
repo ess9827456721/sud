@@ -1,0 +1,33 @@
+{
+  "name": "sud-tracker",
+  "version": "2.0.0",
+  "description": "Судебный Трекер",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "build": {
+    "appId": "ru.sudtracker.app",
+    "productName": "Судебный Трекер",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "extraResources": [
+      { "from": "../court_tracker", "to": "court_tracker" },
+      { "from": "../requirements.txt", "to": "requirements.txt" },
+      { "from": "../build/start.py", "to": "start.py" }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.0.0"
+  }
+}
