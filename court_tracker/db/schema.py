@@ -262,6 +262,12 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             conn.execute(sql)
             logger.info("Migration applied: added column cases.%s", col)
 
+    # ── events — hearing time (СОЮ movement table has a «Время» column) ────
+    event_cols = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "event_time" not in event_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN event_time TEXT")
+        logger.info("Migration applied: added column events.event_time")
+
     # ── clients ─────────────────────────────────────────────────────────────
     client_cols = {row[1] for row in conn.execute("PRAGMA table_info(clients)").fetchall()}
     client_migrations = [
@@ -269,10 +275,27 @@ def run_migrations(conn: sqlite3.Connection) -> None:
         ("contract_date",   "ALTER TABLE clients ADD COLUMN contract_date   TEXT"),
         ("fee_total",       "ALTER TABLE clients ADD COLUMN fee_total       REAL"),
         ("fee_paid",        "ALTER TABLE clients ADD COLUMN fee_paid        REAL"),
+        # Block 3 — KAD monitoring of client cases
+        ("kad_monitoring",   "ALTER TABLE clients ADD COLUMN kad_monitoring   INTEGER NOT NULL DEFAULT 1"),
+        ("kad_last_checked", "ALTER TABLE clients ADD COLUMN kad_last_checked TEXT"),
     ]
     for col, sql in client_migrations:
         if col not in client_cols:
             conn.execute(sql)
             logger.info("Migration applied: added column clients.%s", col)
+
+    # ── client case candidates (Block 3 — KAD monitoring) ───────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS client_case_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            case_number TEXT NOT NULL,
+            kad_url TEXT,
+            court TEXT,
+            found_at TEXT DEFAULT (datetime('now')),
+            status TEXT NOT NULL DEFAULT 'new',
+            UNIQUE(client_id, case_number)
+        )
+    """)
 
     conn.commit()

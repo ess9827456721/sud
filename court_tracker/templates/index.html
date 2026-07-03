@@ -9,26 +9,26 @@
 
 <!-- ===== Metrics row ===== -->
 <div class="metrics-grid">
-  <div class="metric-card">
+  <a href="{{ url_for('cases_list') }}" class="metric-card metric-link">
     <span class="metric-icon">⚖</span>
     <div class="metric-value">{{ total_active }}</div>
     <div class="metric-label">Активных дел</div>
-  </div>
-  <div class="metric-card green">
+  </a>
+  <a href="{{ url_for('cases_list', filter='this_month') }}" class="metric-card green metric-link">
     <span class="metric-icon">🗓</span>
     <div class="metric-value">{{ new_this_month }}</div>
     <div class="metric-label">Добавлено в этом месяце</div>
-  </div>
-  <div class="metric-card">
+  </a>
+  <a href="{{ url_for('cases_list', source='kad') }}" class="metric-card metric-link">
     <span class="metric-icon">🏛</span>
     <div class="metric-value">{{ kad_count }}</div>
     <div class="metric-label">Дел АС (КАД)</div>
-  </div>
-  <div class="metric-card orange">
+  </a>
+  <a href="{{ url_for('cases_list', source='soy') }}" class="metric-card orange metric-link">
     <span class="metric-icon">⚡</span>
     <div class="metric-value">{{ soy_count }}</div>
     <div class="metric-label">Дел СОЮ</div>
-  </div>
+  </a>
   {% if total_active_claims %}
   <div class="metric-card blue">
     <span class="metric-icon">⚖</span>
@@ -83,7 +83,8 @@
       {% if upcoming_hearings %}
         {% for h in upcoming_hearings %}
           {% set parts = (h['event_date'] or '').split('-') %}
-          <div class="hearing-item">
+          <div class="hearing-item row-link"
+               onclick="window.location='{{ url_for('case_detail', case_id=h['case_id']) }}'">
             <div class="hearing-date-box">
               <div class="hd-day">{{ parts[2] if parts|length == 3 else '?' }}</div>
               <div class="hd-mon">
@@ -119,12 +120,13 @@
         {% for d in approaching_deadlines %}
           {% set cls = d['deadline_date'] | urgency_class %}
           {% set days = d['deadline_date'] | days_until %}
-          <div class="deadline-item {{ cls }}">
+          <div class="deadline-item {{ cls }} row-link"
+               onclick="window.location='{{ url_for('case_detail', case_id=d['case_id']) }}#deadlines'">
             <span class="dl-date">
               {% if days == 0 %}Сегодня{% elif days == 1 %}Завтра{% else %}{{ days }} дн.{% endif %}
             </span>
             <div class="dl-title">
-              <a href="{{ url_for('case_detail', case_id=d['case_id']) }}">{{ d['case_number'] }}</a>
+              <a href="{{ url_for('case_detail', case_id=d['case_id']) }}#deadlines">{{ d['case_number'] }}</a>
               — {{ d['deadline_type'] or 'Срок' }}
             </div>
             <div class="dl-meta">
@@ -155,12 +157,13 @@
     {% for p in expiring_poa %}
       {% set cls = p['expiry_date'] | urgency_class %}
       {% set days = p['expiry_date'] | days_until %}
-      <div class="deadline-item {{ cls }}">
+      <div class="deadline-item {{ cls }} row-link"
+           onclick="window.location='{{ url_for('client_detail', client_id=p['client_id_ref']) }}#tab-poa'">
         <span class="dl-date">
           {% if days == 0 %}Сегодня{% elif days == 1 %}Завтра{% else %}{{ days }} дн.{% endif %}
         </span>
         <div class="dl-title">
-          <a href="{{ url_for('client_detail', client_id=p['client_id_ref']) }}">{{ p['client_name'] }}</a>
+          <a href="{{ url_for('client_detail', client_id=p['client_id_ref']) }}#tab-poa">{{ p['client_name'] }}</a>
           — дов. № {{ p['number'] or 'б/н' }}
         </div>
         <div class="dl-meta">Истекает: {{ p['expiry_date'] }}
@@ -170,6 +173,59 @@
     {% endfor %}
   </div>
 </div>
+{% endif %}
+
+<!-- ===== New client cases found in KAD (Block 3) ===== -->
+{% if new_candidates %}
+<div class="card mt-3 border-blue">
+  <div class="card-header">
+    <h2>🔎 Новые дела по клиентам (найдено в КАД)</h2>
+  </div>
+  <div class="card-body">
+    {% for c in new_candidates %}
+      <div class="deadline-item urgency-warn" id="cand-{{ c['id'] }}">
+        <span class="dl-date">{{ (c['found_at'] or '')[:10] }}</span>
+        <div class="dl-title">
+          {{ c['client_name'] }} —
+          {% if c['kad_url'] %}
+            <a href="{{ c['kad_url'] }}" target="_blank" rel="noopener">{{ c['case_number'] }}</a>
+          {% else %}
+            {{ c['case_number'] }}
+          {% endif %}
+        </div>
+        <div class="dl-meta">{{ c['court'] or '' }}</div>
+        <div class="mt-1">
+          <button class="btn btn-primary btn-sm"
+                  onclick="candidateAction({{ c['id'] }}, 'add', this)">Добавить в трекер</button>
+          <button class="btn btn-secondary btn-sm"
+                  onclick="candidateAction({{ c['id'] }}, 'ignore', this)">Скрыть</button>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+<script>
+function candidateAction(id, action, btn) {
+  btn.disabled = true;
+  btn.textContent = action === 'add' ? '⏳ Добавляем…' : '…';
+  fetch('/api/candidates/' + id + '/' + action, {method: 'POST'})
+    .then(r => r.json())
+    .then(function(d) {
+      if (d.success) {
+        var el = document.getElementById('cand-' + id);
+        if (el) el.remove();
+        if (action === 'add' && d.case_id) {
+          window.location = '/cases/' + d.case_id;
+        }
+      } else {
+        btn.disabled = false;
+        btn.textContent = action === 'add' ? 'Добавить в трекер' : 'Скрыть';
+        alert('Ошибка: ' + (d.error || 'неизвестная'));
+      }
+    })
+    .catch(function() { btn.disabled = false; });
+}
+</script>
 {% endif %}
 
 <!-- ===== SOY failure warnings ===== -->

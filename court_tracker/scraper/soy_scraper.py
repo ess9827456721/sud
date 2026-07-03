@@ -127,6 +127,27 @@ class SOYScraper:
 
     # ── Public entry point ────────────────────────────────────────────────────
 
+    def _debug_dump(self, page, tag: str) -> str:
+        """Save screenshot + HTML to the debug/ folder; return message part."""
+        try:
+            from court_tracker.config import DEBUG_DIR
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            png = DEBUG_DIR / f"soy_{tag}_{ts}.png"
+            html = DEBUG_DIR / f"soy_{tag}_{ts}.html"
+            try:
+                page.screenshot(path=str(png), full_page=True)
+            except Exception:
+                pass
+            try:
+                html.write_text(page.content(), encoding="utf-8")
+            except Exception:
+                pass
+            logger.info("SOY debug artifacts: %s, %s", png, html)
+            return f" [debug: {png.name}]"
+        except Exception as exc:
+            logger.debug("debug dump failed: %s", exc)
+            return ""
+
     def scrape_case(self, url: str) -> dict:
         """
         Full 3-tab parse of a sudrf.ru case card.
@@ -134,6 +155,7 @@ class SOYScraper:
         Step 2: events (tab «Движение дела», with AJAX navigation)
         Step 3: parties (tab «Стороны», with 3 strategies)
         """
+        page = None
         try:
             self._launch()
             page = self.context.new_page()
@@ -143,10 +165,12 @@ class SOYScraper:
             time.sleep(random.uniform(1.5, 3.0))
 
             if self._has_captcha(page):
-                return _fail("captcha", "Обнаружена CAPTCHA на сайте суда")
+                return _fail("captcha",
+                             "Обнаружена CAPTCHA на сайте суда" + self._debug_dump(page, "captcha"))
 
             if not self._page_has_content(page):
-                return _fail("failed", "Страница не загрузилась или пустая")
+                return _fail("failed",
+                             "Страница не загрузилась или пустая" + self._debug_dump(page, "empty"))
 
             # ── Step 1: case info ─────────────────────────────────────────────
             case_info = self._extract_case_info_full(page)
@@ -157,7 +181,8 @@ class SOYScraper:
 
             if not events:
                 return _fail("no_data",
-                             "Таблица движения дела не найдена (шаблон не распознан)",
+                             "Таблица движения дела не найдена (шаблон не распознан)"
+                             + self._debug_dump(page, "no_data"),
                              case_info=case_info)
 
             # ── Step 3: parties ───────────────────────────────────────────────
@@ -174,9 +199,10 @@ class SOYScraper:
 
         except Exception as exc:
             err_type = type(exc).__name__
+            dbg = self._debug_dump(page, "exception") if page else ""
             if "Timeout" in err_type:
-                return _fail("failed", "Таймаут: сайт суда не ответил за 30 секунд")
-            return _fail("failed", f"Ошибка парсинга: {str(exc)[:200]}")
+                return _fail("failed", "Таймаут: сайт суда не ответил за 30 секунд" + dbg)
+            return _fail("failed", f"Ошибка парсинга: {str(exc)[:200]}" + dbg)
         finally:
             self._close()
 
@@ -218,10 +244,10 @@ class SOYScraper:
             if m:
                 info["case_number"] = m.group(0)
 
-            # UID — usually 25+ digit string in a dedicated row
-            uid_m = re.search(r'УИД[:\s]+(\d{15,30})', text)
+            # UID like «51RS0018-01-2026-000467-24» — letters and dashes
+            uid_m = re.search(r'УИД[:\s]+([\w\-]{15,40})', text)
             if uid_m:
-                info["uid"] = uid_m.group(1)
+                info["uid"] = uid_m.group(1).strip()
         except Exception:
             pass
 
@@ -346,10 +372,37 @@ class SOYScraper:
 
         return []
 
+    @staticmethod
+    def _build_parties_col_map(header_texts: list[str]) -> dict:
+        """
+        Real sudrf.ru parties header: «Вид лица, участвующего в деле |
+        Фамилия / наименование | ИНН | КПП | ОГРН». КПП/ОГРН are recognised
+        and ignored — КПП must never be read as 'representative'.
+        """
+        col_map: dict = {}
+        for idx, raw in enumerate(header_texts):
+            t = raw.lower().strip()
+            if not t:
+                continue
+            if ("вид лица" in t or "лицо, участвующее" in t) and "role" not in col_map:
+                col_map["role"] = idx
+            elif ("фамилия" in t or "наименование" in t) and "name" not in col_map:
+                col_map["name"] = idx
+            elif "инн" in t and "inn" not in col_map:
+                col_map["inn"] = idx
+            elif "кпп" in t and "kpp" not in col_map:
+                col_map["kpp"] = idx      # recognised, ignored
+            elif "огрн" in t and "ogrn" not in col_map:
+                col_map["ogrn"] = idx     # recognised, ignored
+            elif "представител" in t and "representative" not in col_map:
+                col_map["representative"] = idx
+        return col_map
+
     def _parse_parties_page(self, page) -> list:
         """
-        Parse parties table from current page state.
-        Looks for tables with role keywords; extracts name, INN, representative.
+        Parse the parties table using header-based column mapping.
+        INN comes only from the ИНН column (checksum-validated) when the
+        header has one; representative only from a «Представитель» column.
         """
         _ROLE_KEYWORDS = ["истец", "ответчик", "заявитель", "должник",
                           "взыскатель", "третье лицо", "прокурор",
@@ -363,33 +416,62 @@ class SOYScraper:
                     continue
 
                 rows = table.locator("tr").all()
-                for row in rows:
+                if not rows:
+                    continue
+
+                header_cells = rows[0].locator("th").all() or rows[0].locator("td").all()
+                header_texts = []
+                for c in header_cells:
+                    try:
+                        header_texts.append(c.inner_text().strip())
+                    except Exception:
+                        header_texts.append("")
+                col_map = self._build_parties_col_map(header_texts)
+                has_header = bool(col_map)
+                col_map.setdefault("role", 0)
+                col_map.setdefault("name", 1)
+                data_rows = rows[1:] if has_header else rows
+
+                for row in data_rows:
                     cells = row.locator("td").all()
                     if len(cells) < 2:
                         continue
-                    role_text = cells[0].inner_text().strip()
-                    name_text = cells[1].inner_text().strip()
 
+                    def _cell(key):
+                        idx = col_map.get(key)
+                        if idx is None or idx >= len(cells):
+                            return ""
+                        try:
+                            return cells[idx].inner_text().strip()
+                        except Exception:
+                            return ""
+
+                    role_text = _cell("role")
+                    name_text = _cell("name")
                     if not role_text or not name_text:
                         continue
                     if not any(kw in role_text.lower() for kw in _ROLE_KEYWORDS):
                         continue
 
-                    # Extract INN from name cell (or third cell if present)
-                    inn_source = name_text
-                    if len(cells) >= 3:
-                        inn_source += " " + cells[2].inner_text()
-
-                    inn = _extract_inn(inn_source)
+                    # INN: dedicated column first (checksum validated),
+                    # otherwise search the name cell text
+                    inn = None
+                    if "inn" in col_map:
+                        candidate = re.sub(r"\D", "", _cell("inn"))
+                        if candidate and _validate_inn(candidate):
+                            inn = candidate
+                    if not inn:
+                        inn = _extract_inn(name_text)
 
                     # Clean name: remove INN artefacts in parentheses
                     clean_name = re.sub(r'\s*\(\s*(?:ИНН[:\s]*)?\d{10,12}\s*\)', '',
                                         name_text).strip()
 
-                    # Representative: sometimes in a sub-row or 4th cell
+                    # Representative ONLY from an explicit column — never
+                    # positional cells[3] (that is КПП on sudrf.ru)
                     representative = None
-                    if len(cells) >= 4:
-                        rep = cells[3].inner_text().strip()
+                    if "representative" in col_map:
+                        rep = _cell("representative")
                         if rep and len(rep) > 3:
                             representative = rep[:200]
 
@@ -430,37 +512,134 @@ class SOYScraper:
                 continue
         return []
 
-    def _parse_event_rows(self, rows) -> list:
+    @staticmethod
+    def _classify_event(title: str) -> str:
+        low = title.lower()
+        if any(w in low for w in ["заседание", "слушание", "рассмотрение"]):
+            return "hearing"
+        if any(w in low for w in ["решение", "определение", "приговор", "постановление"]):
+            return "decision"
+        if any(w in low for w in ["приостановление", "возобновление"]):
+            return "suspension"
+        if any(w in low for w in ["поступление", "возбуждение", "принятие к производству"]):
+            return "start"
+        return "other"
+
+    @staticmethod
+    def _build_event_col_map(header_texts: list[str]) -> dict:
+        """
+        Map sudrf.ru movement-table headers to logical columns. Real order is
+        «Наименование события | Дата | Время | Зал заседания | Результат
+        события | Основание … | Примечание | Дата размещения».
+        """
+        col_map: dict = {}
+        for idx, raw in enumerate(header_texts):
+            t = raw.lower().strip()
+            if not t:
+                continue
+            if ("наименование" in t or "событ" in t) and "title" not in col_map:
+                col_map["title"] = idx
+            elif t.startswith("дата") and "размещен" not in t and "date" not in col_map:
+                col_map["date"] = idx
+            elif "время" in t and "time" not in col_map:
+                col_map["time"] = idx
+            elif "зал" in t and "hall" not in col_map:
+                col_map["hall"] = idx
+            elif "результат" in t and "основание" not in t and "result" not in col_map:
+                col_map["result"] = idx
+            elif "примечание" in t and "note" not in col_map:
+                col_map["note"] = idx
+        return col_map
+
+    def _parse_event_table(self, table) -> list:
+        """
+        Header-aware parsing of a movement table. Column positions come from
+        the header row; if no header matches, fall back to a positional
+        heuristic (first cell that parses as a date is the date column).
+        """
         events: list = []
         today = date.today()
-        for row in rows:
+
+        rows = table.locator("tr").all()
+        if not rows:
+            return events
+
+        # 1. Header row: th cells, or td of the first row
+        header_cells = rows[0].locator("th").all()
+        if not header_cells:
+            header_cells = rows[0].locator("td").all()
+        header_texts = []
+        for c in header_cells:
+            try:
+                header_texts.append(c.inner_text().strip())
+            except Exception:
+                header_texts.append("")
+        col_map = self._build_event_col_map(header_texts)
+        data_rows = rows[1:] if col_map else rows
+
+        # 2. Positional fallback: find the date column from the first data row
+        if "date" not in col_map:
+            for row in data_rows[:3]:
+                cells = row.locator("td").all()
+                for idx, c in enumerate(cells):
+                    try:
+                        if _parse_date_str(c.inner_text().strip()):
+                            col_map["date"] = idx
+                            break
+                    except Exception:
+                        pass
+                if "date" in col_map:
+                    break
+            if "date" in col_map and "title" not in col_map:
+                col_map["title"] = 0 if col_map["date"] != 0 else 1
+
+        if "date" not in col_map:
+            return events
+        col_map.setdefault("title", 0)
+
+        skipped = 0
+        for row in data_rows:
             cells = row.locator("td").all()
-            if len(cells) < 2:
-                continue
-            date_text = cells[0].inner_text().strip()
-            desc_text = cells[1].inner_text().strip()
-            if not date_text or not desc_text:
+            if len(cells) <= max(col_map["date"], col_map["title"]):
                 continue
 
-            event_date_str = _parse_date_str(date_text)
+            def _cell(key):
+                idx = col_map.get(key)
+                if idx is None or idx >= len(cells):
+                    return ""
+                try:
+                    return cells[idx].inner_text().strip()
+                except Exception:
+                    return ""
+
+            title = _cell("title")
+            date_text = _cell("date")
+            if not title and not date_text:
+                continue
+
+            event_date_str = _parse_date_str(date_text) if date_text else None
             if not event_date_str:
+                skipped += 1
                 continue
             try:
                 event_date = date.fromisoformat(event_date_str)
             except ValueError:
+                skipped += 1
                 continue
 
-            desc_lower = desc_text.lower()
-            if any(w in desc_lower for w in ["заседание", "слушание", "рассмотрение"]):
-                event_type = "hearing"
-            elif any(w in desc_lower for w in ["решение", "определение", "приговор", "постановление"]):
-                event_type = "decision"
-            elif any(w in desc_lower for w in ["приостановление", "возобновление"]):
-                event_type = "suspension"
-            elif any(w in desc_lower for w in ["поступление", "возбуждение", "принятие к производству"]):
-                event_type = "start"
-            else:
-                event_type = "other"
+            time_text = _cell("time")
+            m_time = re.search(r"\d{1,2}:\d{2}", time_text or "")
+            event_time = m_time.group(0) if m_time else None
+
+            result = _cell("result")
+            hall = _cell("hall")
+            description = title
+            if result:
+                description += " — " + result
+            if hall:
+                description += ", зал " + hall
+            if event_time:
+                description += f" ({event_time})"
 
             doc_url: Optional[str] = None
             try:
@@ -474,27 +653,53 @@ class SOYScraper:
 
             events.append({
                 "event_date":   event_date_str,
-                "event_type":   event_type,
-                "description":  desc_text[:500],
+                "event_time":   event_time,
+                "event_type":   self._classify_event(title),
+                "description":  description[:500],
                 "document_url": doc_url,
                 "is_future":    1 if event_date > today else 0,
             })
+
+        if skipped:
+            logger.info("SOY movement table: %d rows skipped (no parsable date)", skipped)
         return events
 
     def _variant_a_tablcont(self, page) -> list:
+        # Several .tablcont tables may exist (case info, parties…) — pick the
+        # one that actually is the movement table.
+        for table in page.locator("table.tablcont, table#tablcont").all():
+            try:
+                text = table.inner_text().lower()
+            except Exception:
+                continue
+            if "наименование события" in text or "движение" in text:
+                events = self._parse_event_table(table)
+                if events:
+                    return events
+        # Single-table fallback
         table = page.locator("table.tablcont, table#tablcont").first
         if table.count() == 0:
             return []
-        rows = table.locator("tr").all()
-        return self._parse_event_rows(rows[1:] if len(rows) > 1 else rows)
+        return self._parse_event_table(table)
+
+    def _table_of(self, page, row_selector: str):
+        """Return the table containing the first row matched by selector."""
+        row = page.locator(row_selector).first
+        if row.count() == 0:
+            return None
+        table = row.locator("xpath=ancestor::table[1]")
+        return table if table.count() > 0 else None
 
     def _variant_b_dev_ras(self, page) -> list:
-        rows = page.locator("tr.dev_ras").all()
-        return self._parse_event_rows(rows) if rows else []
+        table = self._table_of(page, "tr.dev_ras")
+        return self._parse_event_table(table) if table else []
 
     def _variant_c_odd_even(self, page) -> list:
         rows = page.locator("tr.odd, tr.even").all()
-        return self._parse_event_rows(rows) if len(rows) >= 2 else []
+        if len(rows) < 2:
+            return []
+        table = self._table_of(page, "tr.odd, tr.even")
+        return self._parse_event_table(table) if table else []
 
     def _variant_d_json(self, page) -> list:
         today = date.today()
@@ -562,7 +767,12 @@ class SOYScraper:
         best_count = 0
         try:
             for table in page.locator("table").all():
-                count = len(date_pattern.findall(table.inner_text()))
+                text = table.inner_text()
+                # Must look like a movement table — avoids parsing menus etc.
+                low = text.lower()
+                if "наименование события" not in low and "движение" not in low:
+                    continue
+                count = len(date_pattern.findall(text))
                 if count > best_count:
                     best_count = count
                     best_table = table
@@ -570,8 +780,7 @@ class SOYScraper:
             return []
         if best_table is None or best_count < 2:
             return []
-        rows = best_table.locator("tr").all()
-        return self._parse_event_rows(rows[1:] if len(rows) > 1 else rows)
+        return self._parse_event_table(best_table)
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────

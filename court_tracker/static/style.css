@@ -996,6 +996,23 @@ select.form-control { cursor: pointer; }
 /* Orange border card variant */
 .border-orange { border-color: #F6AD55 !important; }
 .border-orange .card-header { background: #FFFAF0; }
+.border-blue { border-color: #63B3ED !important; }
+.border-blue .card-header { background: #EBF8FF; }
+
+/* ----- Clickable dashboard elements (Block 4) ----------- */
+.metric-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.metric-link:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0,0,0,.12);
+}
+.row-link { cursor: pointer; }
+.row-link:hover { background: rgba(43,108,176,.06); }
 
 /* btn-lg */
 .btn-lg { padding: 12px 24px; font-size: 16px; }
