@@ -111,6 +111,7 @@ class SyncScheduler:
         time.sleep(startup_delay)
         while not self._stop_event.is_set():
             self._sync_all()
+            self._maybe_check_clients()
             # Sleep in small slices so stop_event is noticed quickly
             interval_secs = self._interval_hours * 3600
             elapsed = 0.0
@@ -141,6 +142,34 @@ class SyncScheduler:
             with self._lock:
                 self._is_running = False
             _notify_sync_result(self._run_new_events, self._run_errors)
+
+    # ── Client KAD monitoring (daily) ────────────────────────────────────────
+
+    def _maybe_check_clients(self) -> None:
+        """Run client_monitor.check_all_clients at most once per 24h."""
+        conn = _open_conn()
+        try:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key='kad_monitor_last_run'"
+            ).fetchone()
+            last = row[0] if row else None
+            if last:
+                try:
+                    if datetime.utcnow() - datetime.fromisoformat(last) < timedelta(hours=24):
+                        return
+                except ValueError:
+                    pass
+            from court_tracker.services.client_monitor import check_all_clients
+            check_all_clients(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES ('kad_monitor_last_run', ?)",
+                (datetime.utcnow().isoformat(),),
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.warning("client KAD monitoring error: %s", exc)
+        finally:
+            conn.close()
 
     # ── KAD sync ─────────────────────────────────────────────────────────────
 

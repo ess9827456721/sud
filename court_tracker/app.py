@@ -193,6 +193,12 @@ def create_app() -> Flask:
 
         fin = queries.get_dashboard_financials(conn)
         failed_soy = queries.get_failed_soy_cases(conn)
+        new_candidates = conn.execute(
+            """SELECT cc.*, cl.name AS client_name
+               FROM client_case_candidates cc
+               JOIN clients cl ON cl.id = cc.client_id
+               WHERE cc.status='new' ORDER BY cc.found_at DESC LIMIT 20"""
+        ).fetchall()
         return render_template(
             "index.html",
             total_active=len(active),
@@ -207,6 +213,7 @@ def create_app() -> Flask:
             total_active_claims=fin["total_active_claims"],
             fee_receivable=fin["fee_receivable"],
             failed_soy=failed_soy,
+            new_candidates=new_candidates,
         )
 
     # ------------------------------------------------------------------
@@ -221,6 +228,8 @@ def create_app() -> Flask:
             for k in ("source", "status", "client_id")
             if request.args.get(k)
         }
+        if request.args.get("filter") == "this_month":
+            filters["created_month"] = datetime.utcnow().strftime("%Y-%m")
         case_list = queries.get_all_cases(conn, filters or None)
         clients = conn.execute("SELECT id, name FROM clients ORDER BY name").fetchall()
         statuses = conn.execute(
@@ -560,7 +569,24 @@ def create_app() -> Flask:
                 return render_template("client_form.html", client=None, action="add")
             client_id = queries.upsert_client(conn, data)
             flash("Клиент добавлен.", "success")
-            return redirect(url_for("client_detail", client_id=client_id))
+            # Block 3: immediately look up the client's KAD cases
+            inn = (data.get("inn") or "").strip()
+            if inn.isdigit() and len(inn) in (10, 12):
+                try:
+                    from court_tracker.services.client_monitor import check_client
+                    client_row = conn.execute(
+                        "SELECT * FROM clients WHERE id=?", (client_id,)
+                    ).fetchone()
+                    summary = check_client(conn, client_row)
+                    if summary["new"]:
+                        flash(f"В КАД найдено новых дел: {summary['new']}.", "info")
+                    elif summary["found"] == 0:
+                        flash("Дела клиента в КАД не найдены.", "info")
+                except Exception as exc:
+                    logger.warning("initial KAD check failed for client %s: %s",
+                                   client_id, exc)
+                    flash("Не удалось проверить дела клиента в КАД.", "warning")
+            return redirect(url_for("client_detail", client_id=client_id) + "#tab-cases")
         return render_template("client_form.html", client=None, action="add")
 
     @app.route("/clients/<int:client_id>")
@@ -571,7 +597,13 @@ def create_app() -> Flask:
             flash("Клиент не найден.", "danger")
             return redirect(url_for("clients_list"))
         all_cases = queries.get_all_cases(conn)
-        return render_template("client_detail.html", client=client, all_cases=all_cases)
+        candidates = conn.execute(
+            """SELECT * FROM client_case_candidates
+               WHERE client_id=? AND status='new' ORDER BY found_at DESC""",
+            (client_id,),
+        ).fetchall()
+        return render_template("client_detail.html", client=client,
+                               all_cases=all_cases, kad_candidates=candidates)
 
     @app.route("/clients/<int:client_id>/edit", methods=["GET", "POST"])
     def client_edit(client_id: int):
@@ -1398,6 +1430,87 @@ def create_app() -> Flask:
         conn = _get_db()
         queries.unfreeze_participant_field(conn, part_id, field)
         return jsonify({"success": True, "field": field or "all"})
+
+    # ------------------------------------------------------------------
+    # Client KAD monitoring (Block 3)
+    # ------------------------------------------------------------------
+
+    @app.route("/api/clients/<int:client_id>/check-kad", methods=["POST"])
+    def api_client_check_kad(client_id: int):
+        conn = _get_db()
+        client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not client:
+            return jsonify({"success": False, "error": "client not found"}), 404
+        if not (client["inn"] or "").strip():
+            return jsonify({"success": False, "error": "у клиента не указан ИНН"}), 400
+        try:
+            from court_tracker.services.client_monitor import check_client
+            summary = check_client(conn, client)
+            return jsonify({"success": True, **summary})
+        except Exception as exc:
+            logger.error("check-kad failed for client %s: %s", client_id, exc)
+            return jsonify({"success": False, "error": str(exc)[:200]}), 500
+
+    @app.route("/api/candidates/<int:cand_id>/add", methods=["POST"])
+    def api_candidate_add(cand_id: int):
+        """Create a tracked case from a KAD candidate via the normal pipeline."""
+        conn = _get_db()
+        cand = conn.execute(
+            "SELECT * FROM client_case_candidates WHERE id=?", (cand_id,)
+        ).fetchone()
+        if not cand:
+            return jsonify({"success": False, "error": "candidate not found"}), 404
+
+        case_number = cand["case_number"]
+        data = {
+            "case_number": case_number,
+            "source": "kad",
+            "kad_url": cand["kad_url"],
+            "court": cand["court"],
+            "client_id": cand["client_id"],
+        }
+        details = None
+        try:
+            from court_tracker.scraper.kad_scraper import KADScraper
+            with KADScraper() as scraper:
+                if cand["kad_url"]:
+                    details = scraper.get_case_details(cand["kad_url"])
+                else:
+                    found = scraper.search_by_case_number(case_number)
+                    if found and found.get("kad_url"):
+                        data["kad_url"] = found["kad_url"]
+                        details = scraper.get_case_details(found["kad_url"])
+        except Exception as exc:
+            logger.warning("candidate add: enrichment failed for %s: %s",
+                           case_number, exc)
+
+        if details:
+            details["case_number"] = case_number
+            details["client_id"] = cand["client_id"]
+            case_id = queries.upsert_case(conn, details)
+            queries.save_participants(conn, case_id, details.get("participants", []))
+            _save_events_and_deadlines(conn, case_id, details.get("events", []))
+        else:
+            # Enrichment failed — still create the case from candidate data
+            case_id = queries.upsert_case(conn, data)
+            queries.log_sync(conn, case_id, False,
+                             "кандидат добавлен без деталей (парсинг карточки не удался)")
+
+        conn.execute(
+            "UPDATE client_case_candidates SET status='added' WHERE id=?", (cand_id,)
+        )
+        conn.commit()
+        queries.log_sync(conn, case_id, True, f"дело {case_number} добавлено из КАД-мониторинга")
+        return jsonify({"success": True, "case_id": case_id})
+
+    @app.route("/api/candidates/<int:cand_id>/ignore", methods=["POST"])
+    def api_candidate_ignore(cand_id: int):
+        conn = _get_db()
+        conn.execute(
+            "UPDATE client_case_candidates SET status='ignored' WHERE id=?", (cand_id,)
+        )
+        conn.commit()
+        return jsonify({"success": True})
 
     # ------------------------------------------------------------------
     # Scheduler API (Phase 7)

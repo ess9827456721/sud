@@ -6,4 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url)        => ipcRenderer.send('open-external', url),
   getVersion:   ()           => ipcRenderer.invoke('get-app-version'),
   onFlaskError: (cb)         => ipcRenderer.on('flask-error', (_, msg) => cb(msg)),
+  checkUpdates: ()           => ipcRenderer.send('check-updates'),
+  getAutoUpdateSetting: ()   => ipcRenderer.invoke('get-auto-update-setting'),
+  setAutoUpdateSetting: (on) => ipcRenderer.send('set-auto-update-setting', on),
 });

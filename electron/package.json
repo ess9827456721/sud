@@ -1,6 +1,6 @@
 {
   "name": "sud-tracker",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Судебный Трекер",
   "main": "main.js",
   "scripts": {
@@ -10,6 +10,9 @@
   "build": {
     "appId": "ru.sudtracker.app",
     "productName": "Судебный Трекер",
+    "publish": [
+      { "provider": "github", "owner": "ess9827456721", "repo": "sud" }
+    ],
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
@@ -25,6 +28,9 @@
       { "from": "../court_tracker/templates", "to": "court_tracker/templates" },
       { "from": "../court_tracker/static", "to": "court_tracker/static" }
     ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.0"
   },
   "devDependencies": {
     "electron": "^30.0.0",

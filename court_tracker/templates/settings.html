@@ -55,7 +55,16 @@
         </div>
 
         <div class="form-group text-muted" style="font-size:12px">
-          Версия приложения: {{ settings.app_version }}
+          Версия приложения: <span id="app-version-label">{{ settings.app_version }}</span>
+        </div>
+
+        <div id="updates-block" class="form-group" style="display:none">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="auto-update-cb" style="width:16px;height:16px">
+            <span>Автоматически проверять обновления</span>
+          </label>
+          <button type="button" class="btn btn-secondary btn-sm mt-1"
+                  onclick="checkUpdatesNow()">⬆ Проверить обновления</button>
         </div>
 
         <button type="submit" class="btn btn-primary">💾 Сохранить</button>
@@ -127,6 +136,24 @@ function triggerSync() {
       btn.disabled = false;
       btn.textContent = '⚡ Синхронизировать сейчас';
     });
+}
+
+// ── Updates (visible only inside the Electron app) ─────────────────────────
+if (window.electronAPI) {
+  document.getElementById('updates-block').style.display = 'block';
+  window.electronAPI.getVersion().then(function(v) {
+    document.getElementById('app-version-label').textContent = v;
+  }).catch(function(){});
+  window.electronAPI.getAutoUpdateSetting().then(function(on) {
+    var cb = document.getElementById('auto-update-cb');
+    cb.checked = !!on;
+    cb.addEventListener('change', function() {
+      window.electronAPI.setAutoUpdateSetting(cb.checked);
+    });
+  }).catch(function(){});
+}
+function checkUpdatesNow() {
+  if (window.electronAPI) window.electronAPI.checkUpdates();
 }
 </script>
 {% endblock %}

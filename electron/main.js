@@ -6,9 +6,45 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage,
         ipcMain, Notification, shell, dialog, globalShortcut } = require('electron');
 const path   = require('path');
+const os     = require('os');
 const { spawn } = require('child_process');
 const http   = require('http');
 const fs     = require('fs');
+
+// ── User data dir (must match court_tracker/config.get_data_dir) ───────────
+function getUserDataDir() {
+  const base = process.env.APPDATA || os.homedir();
+  const dir = path.join(base, 'SudTracker');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  return dir;
+}
+
+function readAppSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(getUserDataDir(), 'settings.json'), 'utf8'));
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeAppSettings(patch) {
+  const cur = readAppSettings();
+  const next = { ...cur, ...patch };
+  try {
+    fs.writeFileSync(path.join(getUserDataDir(), 'settings.json'),
+                     JSON.stringify(next, null, 2));
+  } catch (_) {}
+  return next;
+}
+
+function updaterLog(msg) {
+  try {
+    const logDir = path.join(getUserDataDir(), 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, 'updater.log'),
+                      `[${new Date().toISOString()}] ${msg}\n`);
+  } catch (_) {}
+}
 
 // ── Config ─────────────────────────────────────────────────────────────────
 const PORT       = 5000;
@@ -193,6 +229,7 @@ function createTray() {
     { label: 'Открыть', click: () => { mainWindow.show(); mainWindow.focus(); } },
     { type: 'separator' },
     { label: 'Синхронизировать сейчас', click: triggerSync },
+    { label: 'Проверить обновления', click: () => checkForUpdates(true) },
     { type: 'separator' },
     { label: 'Выход', click: () => { isQuitting = true; app.quit(); } },
   ]);
@@ -217,14 +254,12 @@ function triggerSync() {
 }
 
 // ── Sync-result poller ──────────────────────────────────────────────────────
-// scheduler.py writes court_tracker/data/last_sync_result.json after each
+// scheduler.py writes <user-data-dir>/last_sync_result.json after each
 // sync run; poll it every 60s and raise a native notification if fresh.
 
 function pollSyncResult() {
-  const notifyFile = path.join(
-    app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'),
-    'court_tracker', 'data', 'last_sync_result.json'
-  );
+  // scheduler.py writes into the user data dir (%APPDATA%\SudTracker)
+  const notifyFile = path.join(getUserDataDir(), 'last_sync_result.json');
   setInterval(() => {
     try {
       const raw  = fs.readFileSync(notifyFile, 'utf8');
@@ -245,6 +280,80 @@ function pollSyncResult() {
       }
     } catch (_) {}
   }, 60000);
+}
+
+// ── Auto-update (electron-updater + GitHub Releases) ────────────────────────
+
+let autoUpdater = null;
+let updateDownloaded = false;
+
+function initAutoUpdater() {
+  try {
+    autoUpdater = require('electron-updater').autoUpdater;
+  } catch (e) {
+    updaterLog('electron-updater not installed: ' + e.message);
+    return;
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('update-available', info => {
+    updaterLog('update available: ' + info.version);
+    showInfoNotification('Обновление',
+      `Загружается обновление ${info.version}…`);
+  });
+
+  autoUpdater.on('update-downloaded', info => {
+    updateDownloaded = true;
+    updaterLog('update downloaded: ' + info.version);
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'info',
+      title: 'Обновление готово',
+      message: `Версия ${info.version} загружена. Перезапустить сейчас?`,
+      buttons: ['Перезапустить сейчас', 'Позже'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice === 0) {
+      isQuitting = true;
+      // Stop the Flask/PyInstaller child so the installer can replace files
+      if (flaskProc) {
+        try { flaskProc.kill(); } catch (_) {}
+      }
+      autoUpdater.quitAndInstall(false, true);
+    }
+  });
+
+  autoUpdater.on('error', err => {
+    updaterLog('updater error: ' + (err && err.message));
+  });
+}
+
+function checkForUpdates(manual = false) {
+  if (!autoUpdater) {
+    if (manual) showInfoNotification('Обновления', 'Модуль обновлений недоступен.');
+    return;
+  }
+  if (!app.isPackaged) {
+    if (manual) showInfoNotification('Обновления', 'Проверка доступна только в установленной версии.');
+    return;
+  }
+  autoUpdater.checkForUpdates()
+    .then(res => {
+      if (manual) {
+        const latest = res && res.updateInfo && res.updateInfo.version;
+        if (!latest || latest === app.getVersion()) {
+          showInfoNotification('Обновления', `У вас последняя версия (${app.getVersion()}).`);
+        }
+      }
+    })
+    .catch(err => {
+      updaterLog('checkForUpdates failed: ' + (err && err.message));
+      if (manual) {
+        showInfoNotification('Обновления',
+          'Не удалось проверить обновления. Проверьте соединение с интернетом.');
+      }
+    });
 }
 
 // ── Notifications ───────────────────────────────────────────────────────────
@@ -275,6 +384,14 @@ ipcMain.on('notify-error', (_, msg) => showErrorNotification(msg));
 ipcMain.on('notify-info',  (_, title, msg) => showInfoNotification(title, msg));
 ipcMain.on('open-external', (_, url) => shell.openExternal(url));
 ipcMain.handle('get-app-version', () => app.getVersion());
+ipcMain.on('check-updates', () => checkForUpdates(true));
+ipcMain.handle('get-auto-update-setting', () => {
+  const s = readAppSettings();
+  return s.autoCheckUpdates !== false;  // default on
+});
+ipcMain.on('set-auto-update-setting', (_, enabled) => {
+  writeAppSettings({ autoCheckUpdates: !!enabled });
+});
 
 // ── App lifecycle ────────────────────────────────────────────────────────────
 
@@ -283,6 +400,14 @@ app.whenReady().then(() => {
   createTray();
   startFlask();
   pollSyncResult();
+  initAutoUpdater();
+
+  // Quiet startup check (10s after window shows); network failures are silent
+  if (readAppSettings().autoCheckUpdates !== false) {
+    setTimeout(() => {
+      try { checkForUpdates(false); } catch (e) { updaterLog(String(e)); }
+    }, 10000);
+  }
 
   // F5 — reload current page
   globalShortcut.register('F5', () => {

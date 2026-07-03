@@ -16,11 +16,15 @@
     '/settings':  'Настройки',
   };
 
-  function updateTitle() {
+  function updateTitle(version) {
     const path = window.location.pathname;
     const section = SECTION_NAMES[path] || document.title;
-    document.title = 'Судебный Трекер — ' + section;
+    document.title = 'Судебный Трекер — ' + section
+                   + (version ? ' · v' + version : '');
   }
 
   updateTitle();
+  if (window.electronAPI && window.electronAPI.getVersion) {
+    window.electronAPI.getVersion().then(v => updateTitle(v)).catch(() => {});
+  }
 })();

@@ -21,10 +21,14 @@ def random_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:
 
 
 def normalize_case_number(raw: str) -> str:
-    """Strip whitespace and normalise Cyrillic А to Latin A in case numbers."""
+    """
+    Canonical case-number form uses the CYRILLIC 'А' (U+0410).
+    KAD search returns nothing for the Latin spelling ("A70-20030/2025"),
+    so Latin A/a is converted to Cyrillic. The DB stores this form and
+    all KAD queries use it.
+    """
     s = raw.strip()
-    # КАД uses Cyrillic А (U+0410) in case numbers like А40-12345/2024
-    s = s.replace("А", "A")
+    s = s.replace("A", "А").replace("a", "А")
     return s
 
 

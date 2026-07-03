@@ -123,6 +123,9 @@ def get_all_cases(conn: sqlite3.Connection, filters: Optional[dict] = None) -> l
         if filters.get("client_id"):
             where.append("c.client_id = ?")
             params.append(filters["client_id"])
+        if filters.get("created_month"):
+            where.append("substr(c.created_at, 1, 7) = ?")
+            params.append(filters["created_month"])
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY c.updated_at DESC"
@@ -285,11 +288,13 @@ def save_events(conn: sqlite3.Connection, case_id: int, events: list[dict]) -> N
         key = (ev.get("event_date"), ev.get("event_type"))
         if key not in existing_set:
             conn.execute(
-                """INSERT INTO events(case_id, event_date, event_type, description, document_url, is_future)
-                   VALUES (?,?,?,?,?,?)""",
+                """INSERT INTO events(case_id, event_date, event_time, event_type,
+                                      description, document_url, is_future)
+                   VALUES (?,?,?,?,?,?,?)""",
                 (
                     case_id,
                     ev.get("event_date"),
+                    ev.get("event_time"),
                     ev.get("event_type"),
                     ev.get("description"),
                     ev.get("document_url"),
