@@ -26,7 +26,12 @@ if exist "%PWBROWSERS%" (
 )
 
 echo [5/6] Building Python bundle with PyInstaller...
-pyinstaller --onedir --noconsole --noconfirm --name СудебныйТрекер_core ^
+:: --paths . и --collect-submodules обязательны: start.py лежит в build\,
+:: и без них PyInstaller не находит пакет court_tracker (ModuleNotFoundError)
+pyinstaller --onedir --noconsole --noconfirm --name SudTracker_core ^
+  --paths . ^
+  --collect-submodules court_tracker ^
+  --hidden-import court_tracker.app ^
   --add-data "court_tracker/templates;court_tracker/templates" ^
   --add-data "court_tracker/static;court_tracker/static" ^
   --add-data "playwright_browsers;playwright_browsers" ^

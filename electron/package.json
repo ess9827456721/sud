@@ -21,7 +21,7 @@
       "createStartMenuShortcut": true
     },
     "extraResources": [
-      { "from": "../dist/СудебныйТрекер_core", "to": "python_core" },
+      { "from": "../dist/SudTracker_core", "to": "python_core" },
       { "from": "../court_tracker/templates", "to": "court_tracker/templates" },
       { "from": "../court_tracker/static", "to": "court_tracker/static" }
     ]
