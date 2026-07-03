@@ -24,30 +24,50 @@ let isQuitting = false;
 
 // ── Python / Flask startup ─────────────────────────────────────────────────
 
+const isDev = process.argv.includes('--dev') || !app.isPackaged;
+
 function getPythonPath() {
-  if (app.isPackaged) {
-    const bundled = path.join(process.resourcesPath, 'python', 'python.exe');
+  if (!isDev && app.isPackaged) {
+    // PyInstaller bundle: the .exe IS the Python runtime
+    const exeName = process.platform === 'win32'
+      ? 'СудебныйТрекер_core.exe'
+      : 'СудебныйТрекер_core';
+    const bundled = path.join(process.resourcesPath, 'python_core', exeName);
     if (fs.existsSync(bundled)) return bundled;
+    // Fallback: look for any executable in python_core/
+    const coreDir = path.join(process.resourcesPath, 'python_core');
+    if (fs.existsSync(coreDir)) {
+      const files = fs.readdirSync(coreDir).filter(f => f.endsWith('.exe'));
+      if (files.length > 0) return path.join(coreDir, files[0]);
+    }
   }
+  // Dev mode: use system python
   return process.platform === 'win32' ? 'python' : 'python3';
 }
 
 function getStartScript() {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'start.py');
-  }
   return path.join(__dirname, '..', 'build', 'start.py');
 }
 
 function startFlask() {
   const python = getPythonPath();
-  const script = getStartScript();
-  const cwd    = app.isPackaged ? process.resourcesPath
-                                : path.join(__dirname, '..');
+  const isBundle = app.isPackaged && python.endsWith('.exe')
+                   && !python.includes('python.exe');
+  // PyInstaller bundle: run the exe directly (it IS the start script).
+  // System python: run 'python build/start.py'.
+  const args = isBundle ? [] : [getStartScript()];
+  const cwd  = app.isPackaged ? process.resourcesPath
+                              : path.join(__dirname, '..');
 
-  flaskProc = spawn(python, [script], {
+  flaskProc = spawn(python, args, {
     cwd,
-    env: { ...process.env, FLASK_DEBUG: '0', SUD_NO_BROWSER: '1' },
+    env: {
+      ...process.env,
+      FLASK_DEBUG: '0',
+      SUD_NO_BROWSER: '1',
+      // Tell the PyInstaller bundle where templates/static live
+      SUD_RESOURCES_PATH: app.isPackaged ? process.resourcesPath : '',
+    },
     windowsHide: true,
   });
 
