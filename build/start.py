@@ -9,17 +9,36 @@ import time
 import webbrowser
 from pathlib import Path
 
-# ── Playwright browser path ────────────────────────────────────────────────
-# When running from a PyInstaller bundle, the browsers are extracted next to
-# the executable.
+# ── PyInstaller bundle setup ───────────────────────────────────────────────
+# Must run BEFORE importing court_tracker / playwright.
 if getattr(sys, "frozen", False):
     _base = Path(sys.executable).parent
+
+    # Playwright Chromium bundled by PyInstaller (--onedir puts datas in
+    # _internal next to the exe on PyInstaller 6+, or next to the exe on 5.x)
+    for _pw_path in (_base / "playwright_browsers",
+                     _base / "_internal" / "playwright_browsers"):
+        if _pw_path.exists():
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(_pw_path)
+            os.environ["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
+            break
+
+    # Inside the Electron package templates/static live in
+    # resources/court_tracker/, one level up from python_core/
+    _resources = os.environ.get("SUD_RESOURCES_PATH", "")
+    if _resources:
+        os.environ["SUD_TEMPLATES_PATH"] = str(Path(_resources) / "court_tracker" / "templates")
+        os.environ["SUD_STATIC_PATH"] = str(Path(_resources) / "court_tracker" / "static")
 else:
     _base = Path(__file__).resolve().parent.parent
-
-_browsers_path = _base / "playwright_browsers"
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_browsers_path))
-os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+    # Running as 'python build/start.py' — sys.path[0] is build/, so the
+    # court_tracker package next to it is not importable without this:
+    if str(_base) not in sys.path:
+        sys.path.insert(0, str(_base))
+    _pw_path = _base / "playwright_browsers"
+    if _pw_path.exists():
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_pw_path))
+        os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
 
 # ── Flask app ──────────────────────────────────────────────────────────────
 HOST = "127.0.0.1"

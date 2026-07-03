@@ -85,7 +85,14 @@ def _close_db(exc=None) -> None:
 # ---------------------------------------------------------------------------
 
 def create_app() -> Flask:
-    app = Flask(__name__, template_folder="templates", static_folder="static")
+    import os
+    # When frozen with PyInstaller inside the Electron package, templates and
+    # static are shipped as extraResources — start.py points to them via env.
+    templates_path = os.environ.get(
+        "SUD_TEMPLATES_PATH", os.path.join(os.path.dirname(__file__), "templates"))
+    static_path = os.environ.get(
+        "SUD_STATIC_PATH", os.path.join(os.path.dirname(__file__), "static"))
+    app = Flask(__name__, template_folder=templates_path, static_folder=static_path)
     app.secret_key = "court-tracker-dev-secret"
 
     app.teardown_appcontext(_close_db)

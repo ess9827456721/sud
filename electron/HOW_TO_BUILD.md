@@ -13,12 +13,15 @@ cd electron
 build_electron.bat
 ```
 
-Скрипт выполнит четыре шага:
+Скрипт выполнит шесть шагов:
 
-1. Установит Python-зависимости (`requirements.txt` + PyInstaller)
-2. Загрузит браузер Chromium для Playwright
-3. Соберёт Python-ядро приложения через PyInstaller (`--onedir --noconsole`)
-4. Соберёт установщик Windows через electron-builder (NSIS)
+1. Сгенерирует иконки 256×256 (`create_icons.py` — требование electron-builder)
+2. Установит Python-зависимости (`requirements.txt` + PyInstaller)
+3. Загрузит браузер Chromium для Playwright
+4. Скопирует Chromium из `%USERPROFILE%\AppData\Local\ms-playwright` в `playwright_browsers/`
+5. Соберёт Python-ядро через PyInstaller (`--onedir --noconsole`, с Chromium внутри)
+6. Соберёт установщик Windows через electron-builder (NSIS); Python-ядро попадает
+   в пакет как ресурс `python_core/`
 
 ## Результат
 
