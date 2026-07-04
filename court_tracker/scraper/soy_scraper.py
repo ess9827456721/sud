@@ -226,6 +226,54 @@ class SOYScraper:
         except Exception:
             return False
 
+    # ── Court name (page header, not the «Дело» table) ────────────────────────
+
+    _COURT_RE = re.compile(r'([А-ЯЁ][^|—]*?(?:суд|судебный участок)[^|—]*)')
+
+    @staticmethod
+    def _clean_court_name(raw: str) -> str:
+        s = " ".join(raw.split())
+        # Strip navigation / boilerplate words around the name
+        for junk in ("Главная", "Официальный сайт", "ГАС «Правосудие»",
+                     "ГАС \"Правосудие\"", "::", "—", "–"):
+            s = s.replace(junk, " ")
+        s = " ".join(s.split()).strip(" -–—|·,")
+        return s[:150]
+
+    def _extract_court_name(self, page) -> str:
+        # 1. Document <title> — sudrf card titles contain the court name
+        try:
+            title = page.title() or ""
+            m = self._COURT_RE.search(title)
+            if m:
+                name = self._clean_court_name(m.group(1))
+                if len(name) > 5:
+                    return name
+        except Exception:
+            pass
+
+        # 2. Header elements — first text containing «суд»
+        for sel in ("#header", ".heading", ".header", "td.heading", "a.heading"):
+            try:
+                for el in page.locator(sel).all()[:5]:
+                    text = el.inner_text().strip()
+                    m = self._COURT_RE.search(text)
+                    if m:
+                        name = self._clean_court_name(m.group(1))
+                        if len(name) > 5:
+                            return name
+            except Exception:
+                pass
+
+        # 3. Fallback: raw host from the URL — the field is never empty
+        try:
+            m = re.match(r'https?://([^/]+)', page.url or "")
+            if m:
+                return m.group(1)[:150]
+        except Exception:
+            pass
+        return ""
+
     # ── Tab 1: Full case info ─────────────────────────────────────────────────
 
     def _extract_case_info_full(self, page) -> dict:
@@ -235,6 +283,10 @@ class SOYScraper:
         decision_date, decision_result, court_first, uid
         """
         info: dict = {}
+
+        # Court name lives in the PAGE HEADER (or <title>), not in the
+        # «Дело» table. Priority: <title> → header elements → URL host.
+        info["court"] = self._extract_court_name(page)
 
         try:
             text = page.content()

@@ -452,6 +452,64 @@ def create_app() -> Flask:
             return jsonify({"success": True})
         return jsonify({"success": False, "error": "field not allowed or record not found"}), 400
 
+    @app.route("/api/cases/add-kad", methods=["POST"])
+    def api_case_add_kad():
+        """
+        JSON add-case endpoint for the frontend spinner flow (Block 6).
+        Returns {success, message, case_id?} with a human-readable message
+        in EVERY branch so the UI never shows a generic failure.
+        """
+        conn = _get_db()
+        data = request.get_json(force=True, silent=True) or {}
+        case_number = (data.get("case_number") or "").strip()
+        client_id = data.get("client_id") or None
+        if not case_number:
+            return jsonify({"success": False, "message": "Введите номер дела."}), 400
+
+        from court_tracker.scraper.utils import normalize_case_number
+        from court_tracker.scraper.kad_scraper import KADScraper
+        import sqlite3 as _sqlite3
+        case_number = normalize_case_number(case_number)
+        try:
+            with KADScraper() as scraper:
+                result = scraper.search_by_case_number(case_number)
+                details = None
+                if result and result.get("kad_url"):
+                    details = scraper.get_case_details(result["kad_url"])
+                kad_error = scraper.last_error
+            if not result:
+                human = kad_error or (
+                    f"КАД не нашёл дело {case_number}. Проверьте номер: "
+                    "буква А — кириллическая."
+                )
+                queries.log_sync(conn, None, False, human)
+                return jsonify({"success": False, "message": human})
+
+            payload = details if details else result
+            payload.setdefault("case_number", case_number)
+            payload.setdefault("source", "kad")
+            if client_id:
+                payload["client_id"] = client_id
+            case_id = queries.upsert_case(conn, payload)
+            if details:
+                queries.save_participants(conn, case_id, details.get("participants", []))
+                _save_events_and_deadlines(conn, case_id, details.get("events", []))
+            queries.log_sync(conn, case_id, True, "manual add-case (json)")
+            return jsonify({"success": True, "case_id": case_id,
+                            "message": f"Дело {case_number} добавлено."})
+        except _sqlite3.IntegrityError as exc:
+            human = "Ошибка базы данных при сохранении дела: " + str(exc)[:150]
+            queries.log_sync(conn, None, False, human)
+            return jsonify({"success": False, "message": human})
+        except Exception as exc:
+            err_type = type(exc).__name__
+            if "Timeout" in err_type:
+                human = "Сайт КАД не ответил вовремя. Попробуйте позже."
+            else:
+                human = "Ошибка парсинга КАД: " + str(exc)[:150]
+            queries.log_sync(conn, None, False, human)
+            return jsonify({"success": False, "message": human})
+
     @app.route("/api/logs/last")
     def logs_last():
         """Return last 100 sync_log records as plain text (used by error overlay)."""
@@ -1383,6 +1441,10 @@ def create_app() -> Flask:
             for field, val in ci.items():
                 if field in _SOY_SAFE_FIELDS and val:
                     queries.upsert_case_field(conn, case_id, field, val)
+            # Court from the page header — never overwrite a value the
+            # user may have entered manually (no per-field flag on cases)
+            if ci.get("court") and not (case.get("court") or "").strip():
+                queries.upsert_case_field(conn, case_id, "court", ci["court"])
             queries.update_soy_scrape_status(conn, case_id, "success")
             queries.log_sync(conn, case_id, True, "manual СОЮ sync")
             return jsonify({"success": True, "status": "success",

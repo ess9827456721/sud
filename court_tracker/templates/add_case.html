@@ -21,17 +21,22 @@
 
     <!-- KAD tab -->
     <div class="tab-pane {{ 'active' if active_tab == 'kad' }}" id="tab-kad">
-      <form method="post" action="{{ url_for('case_add') }}">
+      <form id="kad-form" method="post" action="{{ url_for('case_add') }}">
         <input type="hidden" name="tab" value="kad">
         <div class="form-group">
           <label class="form-label">Номер дела *</label>
-          <input type="text" name="case_number" class="form-control"
+          <input type="text" name="case_number" id="kad-case-number" class="form-control"
                  placeholder="А40-12345/2024" autofocus required>
           <div class="text-small text-muted mt-1">
             Введите номер — приложение откроет КАД и загрузит карточку автоматически.
           </div>
         </div>
-        <button type="submit" class="btn btn-primary">🔍 Найти и добавить</button>
+        <button type="submit" class="btn btn-primary" id="kad-submit-btn">🔍 Найти и добавить</button>
+        <div id="kad-progress" class="text-small text-muted mt-1" style="display:none">
+          Открываем kad.arbitr.ru → вводим номер → ждём ответ
+        </div>
+        <div id="kad-error" class="flash-msg flash-error mt-1" style="display:none"></div>
+        <div id="kad-success" class="flash-msg flash-success mt-1" style="display:none"></div>
       </form>
     </div>
 
@@ -135,7 +140,7 @@
           </div>
         </div>
 
-        <button type="submit" class="btn btn-success">💾 Сохранить дело СОЮ</button>
+        <button type="submit" class="btn btn-success" id="soy-submit-btn">💾 Сохранить дело СОЮ</button>
       </form>
     </div>
 
@@ -152,6 +157,72 @@
     document.getElementById('tab-' + name).classList.add('active');
     event.target.classList.add('active');
   }
+
+  // ── Block 6: search progress indicator (KAD tab -> JSON endpoint) ────────
+  (function () {
+    var form = document.getElementById('kad-form');
+    if (!form) return;
+    var btn = document.getElementById('kad-submit-btn');
+    var progress = document.getElementById('kad-progress');
+    var errBox = document.getElementById('kad-error');
+    var okBox = document.getElementById('kad-success');
+    var busy = false;
+    var originalLabel = btn.textContent;
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (busy) return;               // no duplicate submits
+      var num = document.getElementById('kad-case-number').value.trim();
+      if (!num) return;
+
+      busy = true;
+      btn.disabled = true;
+      btn.textContent = '⏳ Ищем дело в КАД… (до 1–2 минут)';
+      progress.style.display = 'block';
+      errBox.style.display = 'none';
+      okBox.style.display = 'none';
+
+      fetch('/api/cases/add-kad', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({case_number: num})
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.success) {
+          okBox.textContent = '✓ ' + (d.message || ('Дело ' + num + ' добавлено'));
+          okBox.style.display = 'block';
+          window.location = '/cases/' + d.case_id;
+        } else {
+          errBox.textContent = d.message || 'Не удалось добавить дело.';
+          errBox.style.display = 'block';
+          resetBtn();
+        }
+      })
+      .catch(function () {
+        errBox.textContent = 'Сервер не ответил. Проверьте, что приложение запущено.';
+        errBox.style.display = 'block';
+        resetBtn();
+      });
+
+      function resetBtn() {
+        busy = false;
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        progress.style.display = 'none';
+      }
+    });
+  })();
+
+  // ── Block 6: SOY tab — disable button during submit ─────────────────────
+  (function () {
+    var soyBtn = document.getElementById('soy-submit-btn');
+    if (!soyBtn) return;
+    soyBtn.closest('form').addEventListener('submit', function () {
+      soyBtn.disabled = true;
+      soyBtn.textContent = '⏳ Загружаем карточку СОЮ…';
+    });
+  })();
 
   function egrulFill(innFieldId, nameFieldId) {
     var inn = document.getElementById(innFieldId).value.trim();

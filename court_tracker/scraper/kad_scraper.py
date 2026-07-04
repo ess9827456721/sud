@@ -149,7 +149,66 @@ class KADScraper:
     # (no fingerprint headers), so the page must issue the request itself.
     # ------------------------------------------------------------------
 
-    _SUBMIT_SEL = 'button[type="submit"]:has-text("Найти")'
+    # Confirmed in the live dump: the submit button lives in #b-form-submit
+    _SUBMIT_SELECTORS = ('#b-form-submit button',
+                         'button[type="submit"]:has-text("Найти")')
+
+    def _click_submit(self, page) -> None:
+        last_exc = None
+        for sel in self._SUBMIT_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() and btn.is_visible(timeout=1500):
+                    btn.click()
+                    return
+            except Exception as exc:
+                last_exc = exc
+        raise RuntimeError(f"submit click failed: {last_exc or 'button not found'}")
+
+    def _commit_input(self, page, locator, text: str) -> bool:
+        """
+        Confirm the suggest so the value becomes a filter chip.
+        KAD's filter widget commits typed text to its model only when the
+        suggest entry is confirmed (Enter or click) — clicking «Найти»
+        without confirming discards the text.
+        """
+        try:
+            item = page.locator("#b-suggest li.active a, .b-suggest li.active a").first
+            if item.is_visible(timeout=2000):
+                item.click()
+            else:
+                locator.press("Enter")
+        except Exception:
+            try:
+                locator.press("Enter")
+            except Exception:
+                pass
+        page.wait_for_timeout(600)
+
+        # Verify the chip exists: the text must now live OUTSIDE .b-suggest
+        try:
+            committed = page.evaluate("""(txt) => {
+                const hid = document.querySelector('input[name="caseNumber"]');
+                if (hid && hid.value && hid.value.includes(txt)) return true;
+                // generic: any leaf element outside .b-suggest containing the text
+                for (const el of document.querySelectorAll('#b-form div, #b-form span')) {
+                    if (!el.closest('.b-suggest') && el.childElementCount === 0 &&
+                        el.textContent.trim().includes(txt)) return true;
+                }
+                return false;
+            }""", text)
+        except Exception as exc:
+            logger.warning("KAD: commit verification failed: %s", exc)
+            committed = False
+
+        if not committed:
+            self._debug_dump(page, "commit_failed")
+            logger.error("KAD: input was not committed to the filter model")
+            self.last_error = (
+                "КАД не принял введённое значение (подсказка не подтвердилась). "
+                "Скриншот и HTML сохранены в debug/."
+            )
+        return bool(committed)
 
     def _run_search(self, page, fill_fn) -> Optional[dict]:
         """Type via fill_fn, click «Найти», return the intercepted JSON."""
@@ -157,12 +216,27 @@ class KADScraper:
         if not fill_fn():
             return None
         self._dismiss_overlays(page)
+        class _ClickFailed(Exception):
+            pass
+
         try:
-            with page.expect_response(
-                    lambda r: "SearchInstances" in r.url,
-                    timeout=30_000) as resp_info:
-                page.locator(self._SUBMIT_SEL).first.click()
-            resp = resp_info.value
+            try:
+                with page.expect_response(
+                        lambda r: "SearchInstances" in r.url,
+                        timeout=30_000) as resp_info:
+                    try:
+                        self._click_submit(page)
+                    except Exception as exc:
+                        raise _ClickFailed(str(exc)) from exc
+                resp = resp_info.value
+            except _ClickFailed as exc:
+                # Distinguish a click failure from a missing XHR
+                self._debug_dump(page, "click_failed")
+                self.last_error = (
+                    f"КАД: не удалось нажать кнопку «Найти» ({str(exc)[:150]}). "
+                    "Скриншот и HTML сохранены в debug/."
+                )
+                return None
 
             if resp.status == 451:
                 logger.warning("KAD rate-limited (451) on native request; retry in 45s")
@@ -170,7 +244,7 @@ class KADScraper:
                 with page.expect_response(
                         lambda r: "SearchInstances" in r.url,
                         timeout=30_000) as resp_info2:
-                    page.locator(self._SUBMIT_SEL).first.click()
+                    self._click_submit(page)
                 resp = resp_info2.value
 
             if resp.status != 200:
@@ -301,7 +375,11 @@ class KADScraper:
                     logger.error("KAD UI: case number input not found")
                     self._debug_dump(page, "no_case_input")
                     return False
-                return self._type_into(page, field, case_number)
+                if not self._type_into(page, field, case_number):
+                    return False
+                # Typed text lives only in the suggest dropdown until
+                # confirmed — commit it into the filter model first.
+                return self._commit_input(page, field, case_number)
 
             data = self._run_search(page, _fill_case)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
@@ -362,14 +440,20 @@ class KADScraper:
                     return False
                 if not self._type_into(page, field, inn):
                     return False
-                # A .b-suggest dropdown may appear — do NOT click it:
-                # free-text side search works. Close it with Escape.
+                # Escape CANCELS the pending input — never press it here.
+                # If KAD shows the participant suggest with concrete
+                # organizations, click the first item; otherwise commit
+                # the free text with Enter (chip check is generic — the
+                # hidden caseNumber input does not apply to this field).
                 try:
-                    if page.locator(".b-suggest").first.is_visible(timeout=1500):
-                        page.keyboard.press("Escape")
+                    first_item = page.locator("#b-suggest li a, .b-suggest li a").first
+                    if first_item.is_visible(timeout=2000):
+                        first_item.click()
+                        page.wait_for_timeout(600)
+                        return True
                 except Exception:
                     pass
-                return True
+                return self._commit_input(page, field, inn)
 
             data = self._run_search(page, _fill_inn)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
