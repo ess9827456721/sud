@@ -1,6 +1,6 @@
 {
   "name": "sud-tracker",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Судебный Трекер",
   "main": "main.js",
   "scripts": {
@@ -11,7 +11,7 @@
     "appId": "ru.sudtracker.app",
     "productName": "Судебный Трекер",
     "publish": [
-      { "provider": "github", "owner": "ess9827456721", "repo": "sud" }
+      { "provider": "github", "owner": "ess9827456721", "repo": "sud", "releaseType": "release" }
     ],
     "win": {
       "target": "nsis",
