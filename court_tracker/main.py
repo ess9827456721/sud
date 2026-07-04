@@ -54,9 +54,11 @@ def cmd_add_inn(inn: str) -> None:
     conn = open_db()
     with KADScraper() as scraper:
         results = scraper.search_by_inn(inn)
+        kad_error = scraper.last_error
     if not results:
-        print("No cases found.")
-        queries.log_sync(conn, None, False, f"add-inn {inn}: no results")
+        human = kad_error or f"add-inn {inn}: no results"
+        print(human if kad_error else "No cases found.")
+        queries.log_sync(conn, None, False, human)
         return
     for r in results:
         case_id = queries.upsert_case(conn, r)
@@ -83,8 +85,9 @@ def cmd_add_case(case_number: str) -> None:
     with KADScraper() as scraper:
         result = scraper.search_by_case_number(case_number)
         if not result:
-            print(f"Case {case_number} not found on KAD.")
-            queries.log_sync(conn, None, False, f"add-case {case_number}: not found")
+            human = scraper.last_error or f"add-case {case_number}: not found"
+            print(human)
+            queries.log_sync(conn, None, False, human)
             return
         details = None
         if result.get("kad_url"):

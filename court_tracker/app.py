@@ -279,11 +279,14 @@ def create_app() -> Flask:
                         details = None
                         if result and result.get("kad_url"):
                             details = scraper.get_case_details(result["kad_url"])
+                        kad_error = scraper.last_error
                     if not result:
-                        flash(f"Дело не найдено: {case_number}", "error")
+                        human = kad_error or f"Дело не найдено: {case_number}"
+                        queries.log_sync(conn, None, False, human)
+                        flash(human, "error")
                         return render_template(
                             "add_case.html", clients=clients, active_tab="kad",
-                            scraper_error="not found: " + case_number,
+                            scraper_error=human,
                         )
                     data = details if details else result
                     data.setdefault("case_number", case_number)

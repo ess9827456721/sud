@@ -22,6 +22,9 @@ class KADScraper:
     def __init__(self):
         self._browser = None
         self._playwright = None
+        # Human-readable explanation of the last failure — callers put it
+        # into sync_log / flash messages.
+        self.last_error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Context manager support
@@ -105,7 +108,98 @@ class KADScraper:
             pass
 
     # ------------------------------------------------------------------
-    # Internal JSON API
+    # Human-like typing (KAD's Backbone model only reacts to key events —
+    # locator.fill() leaves the model empty and the search never runs)
+    # ------------------------------------------------------------------
+
+    def _type_into(self, page, locator, text: str) -> bool:
+        locator.click()
+        locator.press("Control+a")
+        locator.press("Delete")
+        page.keyboard.type(text, delay=90)  # real keydown/keypress/input events
+        random_delay(0.4, 0.9)
+        try:
+            if locator.input_value() != text:
+                logger.error("KAD: typed text did not stick in the field")
+                self._debug_dump(page, "type_failed")
+                return False
+        except Exception:
+            pass
+        return True
+
+    # ------------------------------------------------------------------
+    # Human-readable failure messages (surfaced to sync_log by callers)
+    # ------------------------------------------------------------------
+
+    def _log_human(self, status: int) -> None:
+        if status == 451:
+            self.last_error = (
+                "КАД временно ограничил автоматические запросы с этого IP. "
+                "Повторите через 15–30 минут; данные дел сохранены."
+            )
+        else:
+            self.last_error = (
+                f"КАД вернул HTTP {status}. Скриншот и HTML сохранены в debug/."
+            )
+        logger.warning(self.last_error)
+
+    # ------------------------------------------------------------------
+    # Search: drive the real UI and intercept the site's own XHR.
+    # KAD's anti-bot layer answers 451 to hand-crafted fetch() calls
+    # (no fingerprint headers), so the page must issue the request itself.
+    # ------------------------------------------------------------------
+
+    _SUBMIT_SEL = 'button[type="submit"]:has-text("Найти")'
+
+    def _run_search(self, page, fill_fn) -> Optional[dict]:
+        """Type via fill_fn, click «Найти», return the intercepted JSON."""
+        self._dismiss_overlays(page)
+        if not fill_fn():
+            return None
+        self._dismiss_overlays(page)
+        try:
+            with page.expect_response(
+                    lambda r: "SearchInstances" in r.url,
+                    timeout=30_000) as resp_info:
+                page.locator(self._SUBMIT_SEL).first.click()
+            resp = resp_info.value
+
+            if resp.status == 451:
+                logger.warning("KAD rate-limited (451) on native request; retry in 45s")
+                page.wait_for_timeout(45_000)
+                with page.expect_response(
+                        lambda r: "SearchInstances" in r.url,
+                        timeout=30_000) as resp_info2:
+                    page.locator(self._SUBMIT_SEL).first.click()
+                resp = resp_info2.value
+
+            if resp.status != 200:
+                self._debug_dump(page, f"http_{resp.status}")
+                self._log_human(resp.status)
+                return None
+            return resp.json()
+        except Exception as exc:
+            # No XHR fired (or timeout) — regression marker for the fill() bug
+            logger.warning("KAD: no SearchInstances XHR intercepted: %s", exc)
+            try:
+                if page.locator(".b-case-blank__emptyText").first.is_visible(timeout=1000):
+                    self._debug_dump(page, "search_not_run")
+                    self.last_error = (
+                        "КАД не выполнил поиск — возможно, изменился интерфейс. "
+                        "Скриншот и HTML сохранены в debug/."
+                    )
+                    return None
+            except Exception:
+                pass
+            self._debug_dump(page, "no_xhr")
+            self.last_error = (
+                "КАД не выполнил поиск — возможно, изменился интерфейс. "
+                "Скриншот и HTML сохранены в debug/."
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Hand-crafted fetch — LAST resort only (currently earns HTTP 451)
     # ------------------------------------------------------------------
 
     def _api_search(self, page, payload: dict) -> Optional[dict]:
@@ -194,12 +288,43 @@ class KADScraper:
     def search_by_case_number(self, case_number: str) -> Optional[dict]:
         """Search KAD for a specific case number. Returns case dict or None."""
         case_number = normalize_case_number(case_number)
+        self.last_error = None
         page = None
         try:
             page = self._new_page()
             self._open_main_page(page)
 
-            # ── Primary: internal JSON API ────────────────────────────────
+            # ── 1. UI + interception of the site's own XHR ────────────────
+            def _fill_case():
+                field = self._find_case_number_input(page)
+                if field is None:
+                    logger.error("KAD UI: case number input not found")
+                    self._debug_dump(page, "no_case_input")
+                    return False
+                return self._type_into(page, field, case_number)
+
+            data = self._run_search(page, _fill_case)
+            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
+            if cases:
+                return cases[0]
+            if data is not None:
+                # Search ran but found nothing
+                self.last_error = (
+                    f"КАД не нашёл дело {case_number}. Проверьте номер: "
+                    "буква А — кириллическая."
+                )
+                return None
+
+            # ── 2. DOM parse of the results page ─────────────────────────
+            try:
+                page.wait_for_load_state("networkidle", timeout=TIMEOUT)
+            except Exception:
+                pass
+            results = self._parse_search_results(page)
+            if results:
+                return results[0]
+
+            # ── 3. Last resort: hand-crafted fetch (currently 451) ───────
             payload = {
                 "Page": 1, "Count": 25, "Courts": [],
                 "DateFrom": None, "DateTo": None,
@@ -208,16 +333,9 @@ class KADScraper:
                 "WithVKSInstances": False,
             }
             data = self._api_search(page, payload)
-            items = self._api_items(data)
-            cases = [c for c in (self._item_to_case(i) for i in items) if c]
+            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
             if cases:
                 return cases[0]
-
-            # ── Fallback: UI search ───────────────────────────────────────
-            logger.info("KAD API gave no results for %s — trying UI fallback", case_number)
-            result = self._ui_search_case_number(page, case_number)
-            if result:
-                return result
 
             self._debug_dump(page, "search_empty")
             return None
@@ -229,11 +347,48 @@ class KADScraper:
 
     def search_by_inn(self, inn: str) -> list[dict]:
         """Search KAD for all cases involving a party with the given INN."""
+        self.last_error = None
         page = None
         try:
             page = self._new_page()
             self._open_main_page(page)
 
+            # ── 1. UI + interception ──────────────────────────────────────
+            def _fill_inn():
+                field = self._find_inn_input(page)
+                if field is None:
+                    logger.error("KAD UI: participant/INN input not found")
+                    self._debug_dump(page, "no_inn_input")
+                    return False
+                if not self._type_into(page, field, inn):
+                    return False
+                # A .b-suggest dropdown may appear — do NOT click it:
+                # free-text side search works. Close it with Escape.
+                try:
+                    if page.locator(".b-suggest").first.is_visible(timeout=1500):
+                        page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return True
+
+            data = self._run_search(page, _fill_inn)
+            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
+            if cases:
+                return cases
+            if data is not None:
+                self.last_error = f"КАД не нашёл дел по ИНН {inn}."
+                return []
+
+            # ── 2. DOM parse ──────────────────────────────────────────────
+            try:
+                page.wait_for_load_state("networkidle", timeout=TIMEOUT)
+            except Exception:
+                pass
+            results = self._parse_search_results(page)
+            if results:
+                return results
+
+            # ── 3. Last resort: hand-crafted fetch ────────────────────────
             payload = {
                 "Page": 1, "Count": 25, "Courts": [],
                 "DateFrom": None, "DateTo": None,
@@ -242,15 +397,9 @@ class KADScraper:
                 "WithVKSInstances": False,
             }
             data = self._api_search(page, payload)
-            items = self._api_items(data)
-            cases = [c for c in (self._item_to_case(i) for i in items) if c]
+            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
             if cases:
                 return cases
-
-            logger.info("KAD API gave no results for INN %s — trying UI fallback", inn)
-            ui = self._ui_search_inn(page, inn)
-            if ui:
-                return ui
 
             self._debug_dump(page, "inn_empty")
             return []
@@ -265,21 +414,14 @@ class KADScraper:
     # ------------------------------------------------------------------
 
     def _find_case_number_input(self, page):
-        # a) known id
+        # Live DOM: INPUT with placeholder «например, А50-5568/08», empty id
         try:
-            el = page.locator("input#sug-cases").first
+            el = page.get_by_placeholder(re.compile("А50-5568")).first
             if el.is_visible(timeout=2000):
                 return el
         except Exception:
             pass
-        # b) KAD's example placeholder «например, А50-5568/08»
-        try:
-            el = page.get_by_placeholder(re.compile("А50-5568")).first
-            if el.is_visible(timeout=1500):
-                return el
-        except Exception:
-            pass
-        # c) input inside the container labelled «Номер дела»
+        # Container-based fallback
         for sel in ('div:has-text("Номер дела") input',
                     'li:has-text("Номер дела") input'):
             try:
@@ -293,9 +435,17 @@ class KADScraper:
         return None
 
     def _find_inn_input(self, page):
-        for sel in ("input#sug-participants",
-                    'div:has-text("Участник дела") textarea',
+        # Live DOM: TEXTAREA with placeholder «название, ИНН или ОГРН» —
+        # do not restrict to input
+        try:
+            el = page.get_by_placeholder("название, ИНН или ОГРН").first
+            if el.is_visible(timeout=2000):
+                return el
+        except Exception:
+            pass
+        for sel in ('div:has-text("Участник дела") textarea',
                     'div:has-text("Участник дела") input',
+                    'textarea[placeholder*="ИНН"]',
                     'input[placeholder*="ИНН"]'):
             try:
                 el = page.locator(sel).last
@@ -305,66 +455,37 @@ class KADScraper:
                 pass
         return None
 
-    def _submit_search(self, page, field) -> None:
-        self._dismiss_overlays(page)
-        for sel in ("#b-form-submit button", 'button:has-text("Найти")',
-                    'button[type="submit"]'):
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=1000):
-                    btn.click()
-                    return
-            except Exception:
-                pass
-        try:
-            field.press("Enter")
-        except Exception:
-            pass
-
-    def _ui_search_case_number(self, page, case_number: str) -> Optional[dict]:
-        self._dismiss_overlays(page)
-        field = self._find_case_number_input(page)
-        if field is None:
-            logger.error("KAD UI: case number input not found")
-            self._debug_dump(page, "no_case_input")
-            return None
-        field.fill(case_number)
-        random_delay(0.5, 1.0)
-        self._submit_search(page, field)
-        try:
-            page.wait_for_load_state("networkidle", timeout=TIMEOUT)
-        except Exception:
-            pass
-        random_delay(1, 2)
-        results = self._parse_search_results(page)
-        return results[0] if results else None
-
-    def _ui_search_inn(self, page, inn: str) -> list[dict]:
-        self._dismiss_overlays(page)
-        field = self._find_inn_input(page)
-        if field is None:
-            logger.error("KAD UI: participant/INN input not found")
-            self._debug_dump(page, "no_inn_input")
-            return []
-        field.fill(inn)
-        random_delay(0.5, 1.0)
-        self._submit_search(page, field)
-        try:
-            page.wait_for_load_state("networkidle", timeout=TIMEOUT)
-        except Exception:
-            pass
-        random_delay(1, 2)
-        return self._parse_search_results(page)
-
     # ------------------------------------------------------------------
     # Card page (details)
     # ------------------------------------------------------------------
 
     def get_case_details(self, kad_url: str) -> Optional[dict]:
-        """Fetch full case details from a KAD Card page."""
+        """
+        Fetch full case details from a KAD Card page.
+        The card is a JS app that loads its data via /Kad/ XHRs — collect
+        those JSON payloads during load and prefer them over DOM scraping.
+        """
         page = None
         try:
             page = self._new_page()
+
+            collected: list[dict] = []
+
+            def _on_response(resp):
+                try:
+                    if "/Kad/" not in resp.url:
+                        return
+                    ctype = (resp.headers or {}).get("content-type", "")
+                    if "json" not in ctype:
+                        return
+                    body = resp.json()
+                    if isinstance(body, dict):
+                        collected.append({"url": resp.url, "json": body})
+                except Exception:
+                    pass
+
+            page.on("response", _on_response)
+
             page.goto(kad_url, wait_until="domcontentloaded")
             try:
                 page.wait_for_load_state("networkidle", timeout=TIMEOUT)
@@ -374,6 +495,18 @@ class KADScraper:
             self._dismiss_overlays(page)
 
             case_data = self._parse_case_page(page, kad_url)
+
+            # Prefer intercepted JSON payloads over DOM scraping
+            api_data = self._extract_from_card_payloads(collected)
+            for key in ("case_number", "court", "judge", "status",
+                        "case_type", "start_date"):
+                if api_data.get(key):
+                    case_data[key] = api_data[key]
+            if api_data.get("participants"):
+                case_data["participants"] = api_data["participants"]
+            if api_data.get("events"):
+                case_data["events"] = api_data["events"]
+
             if not case_data.get("case_number") and not case_data.get("events"):
                 self._debug_dump(page, "card_empty")
             return case_data
@@ -382,6 +515,97 @@ class KADScraper:
             if page:
                 self._debug_dump(page, "card_error")
             return None
+
+    def _extract_from_card_payloads(self, collected: list[dict]) -> dict:
+        """
+        Inspect JSON payloads intercepted on the Card page (/Kad/Card,
+        /Kad/CaseDocumentsPage, …) and pull out whatever case data they
+        carry. Shapes are handled defensively — DOM scraping remains the
+        fallback for anything not found here.
+        """
+        out: dict = {"participants": [], "events": []}
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
+        def _walk(node, depth=0):
+            if depth > 6:
+                return
+            if isinstance(node, dict):
+                # Case header info
+                num = node.get("CaseNumber") or node.get("CaseNo")
+                if num and not out.get("case_number"):
+                    out["case_number"] = normalize_case_number(str(num))
+                court = node.get("CourtName") or node.get("Court")
+                if isinstance(court, str) and court and not out.get("court"):
+                    out["court"] = court[:300]
+                judge = node.get("Judge") or node.get("JudgeName")
+                if isinstance(judge, str) and judge and not out.get("judge"):
+                    out["judge"] = judge[:300]
+
+                # Participants
+                for key, role in (("Plaintiffs", "Истец"),
+                                  ("Respondents", "Ответчик"),
+                                  ("Thirds", "Третье лицо")):
+                    lst = node.get(key)
+                    if isinstance(lst, list):
+                        for p in lst:
+                            if isinstance(p, dict) and p.get("Name"):
+                                out["participants"].append({
+                                    "role": role,
+                                    "name": str(p["Name"])[:300],
+                                    "inn": str(p.get("Inn") or ""),
+                                    "address": str(p.get("Address") or "")[:300],
+                                })
+
+                # Documents / events
+                for key in ("Items", "Documents"):
+                    lst = node.get(key)
+                    if isinstance(lst, list):
+                        for d in lst:
+                            if not isinstance(d, dict):
+                                continue
+                            date_raw = (d.get("Date") or d.get("EventDate")
+                                        or d.get("PublishDate") or "")
+                            m = re.search(r"\d{4}-\d{2}-\d{2}", str(date_raw))
+                            if not m:
+                                continue
+                            desc = (d.get("ContentTypeName") or d.get("Type")
+                                    or d.get("DocumentTypeName") or "")
+                            extra = d.get("Declarers") or d.get("Comment") or ""
+                            text = " ".join(str(x) for x in (desc, extra) if x).strip()
+                            if not text:
+                                continue
+                            out["events"].append({
+                                "event_date": m.group(0),
+                                "event_type": "hearing" if "заседан" in text.lower() else "other",
+                                "description": text[:500],
+                                "document_url": d.get("FileUrl") or "",
+                                "is_future": 1 if m.group(0) > today else 0,
+                            })
+                for v in node.values():
+                    _walk(v, depth + 1)
+            elif isinstance(node, list):
+                for v in node:
+                    _walk(v, depth + 1)
+
+        for entry in collected:
+            logger.debug("KAD card payload from %s: keys=%s",
+                         entry["url"], list(entry["json"].keys()))
+            _walk(entry["json"])
+
+        # De-duplicate
+        seen = set()
+        out["participants"] = [
+            p for p in out["participants"]
+            if not ((p["role"], p["name"].lower()) in seen
+                    or seen.add((p["role"], p["name"].lower())))
+        ]
+        seen_ev = set()
+        out["events"] = [
+            e for e in out["events"]
+            if not ((e["event_date"], e["description"][:80]) in seen_ev
+                    or seen_ev.add((e["event_date"], e["description"][:80])))
+        ]
+        return out
 
     # ------------------------------------------------------------------
     # Private parsing helpers
