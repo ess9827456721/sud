@@ -282,10 +282,136 @@ function pollSyncResult() {
   }, 60000);
 }
 
+// ── Russian application menu (Блок В) ───────────────────────────────────────
+
+function buildAppMenu() {
+  const template = [
+    {
+      label: 'Файл',
+      submenu: [
+        { label: 'Проверить обновления', click: () => checkForUpdates(true) },
+        { type: 'separator' },
+        { label: 'Выход', role: 'quit' },
+      ],
+    },
+    {
+      label: 'Правка',
+      submenu: [
+        { label: 'Отменить', role: 'undo' },
+        { label: 'Повторить', role: 'redo' },
+        { type: 'separator' },
+        { label: 'Вырезать', role: 'cut' },
+        { label: 'Копировать', role: 'copy' },
+        { label: 'Вставить', role: 'paste' },
+        { label: 'Выделить всё', role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'Вид',
+      submenu: [
+        { label: 'Обновить', role: 'reload' },
+        { label: 'Инструменты разработчика', role: 'toggleDevTools' },
+        { type: 'separator' },
+        { label: 'Масштаб 100%', role: 'resetZoom' },
+        { label: 'Крупнее', role: 'zoomIn' },
+        { label: 'Мельче', role: 'zoomOut' },
+        { type: 'separator' },
+        { label: 'Полноэкранный режим', role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Окно',
+      submenu: [
+        { label: 'Свернуть', role: 'minimize' },
+        { label: 'Закрыть окно', role: 'close' },
+      ],
+    },
+    {
+      label: 'Справка',
+      submenu: [
+        {
+          label: 'О приложении',
+          click: () => {
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: 'О приложении',
+              message: 'Судебный Трекер',
+              detail: `Версия: ${app.getVersion()}\n`
+                    + `Данные: ${getUserDataDir()}`,
+              buttons: ['OK'],
+            });
+          },
+        },
+        {
+          label: 'Репозиторий на GitHub',
+          click: () => shell.openExternal('https://github.com/ess9827456721/sud'),
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 // ── Auto-update (electron-updater + GitHub Releases) ────────────────────────
 
 let autoUpdater = null;
 let updateDownloaded = false;
+let manualCheckActive = false;
+
+// Translate electron-updater errors into truthful Russian explanations.
+// The generic "check your internet" text misled diagnostics when the real
+// cause was "No published versions on GitHub".
+function updaterErrorMessage(err) {
+  const s = String(err && (err.message || err));
+  const code = err && err.code;
+  if (/No published versions/i.test(s))
+    return 'На GitHub нет опубликованных релизов. Опубликуйте релиз ' +
+           '(черновики Draft обновлятору не видны).';
+  if (/404/.test(s) || /HttpError: 404/i.test(s))
+    return 'Репозиторий или файл релиза не найден (404). Проверьте owner/repo ' +
+           'в package.json и что релиз содержит latest.yml.';
+  if (/403|rate limit/i.test(s))
+    return 'GitHub временно ограничил запросы (403/rate limit). ' +
+           'Повторите через несколько минут.';
+  if (/latest\.yml/i.test(s))
+    return 'В релизе отсутствует или повреждён latest.yml — соберите релиз ' +
+           'через electron-builder --publish, не загружайте файлы вручную.';
+  if (/sha512|checksum/i.test(s))
+    return 'Контрольная сумма установщика не совпала — файл релиза повреждён ' +
+           'или заменён вручную. Пересоберите релиз.';
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|net::/i.test(s) ||
+      ['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT'].includes(code))
+    return 'Нет доступа к github.com — проверьте интернет, прокси или файрвол.';
+  if (/ERR_UPDATER_ZIP|EPERM|EBUSY|locked/i.test(s))
+    return 'Не удалось записать файлы обновления — закройте приложение ' +
+           'полностью (включая иконку в трее) и повторите.';
+  return 'Ошибка обновления: ' + s.slice(0, 200);
+}
+
+function isNetworkError(err) {
+  const s = String(err && (err.message || err));
+  const code = err && err.code;
+  return /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|net::/i.test(s) ||
+         ['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT'].includes(code);
+}
+
+function showUpdaterErrorDialog(err) {
+  const human = updaterErrorMessage(err);
+  const raw = String(err && (err.message || err)).slice(0, 300);
+  const logPath = path.join(getUserDataDir(), 'logs', 'updater.log');
+  const choice = dialog.showMessageBoxSync(mainWindow, {
+    type: 'error',
+    title: 'Ошибка обновления',
+    message: human,
+    detail: raw,
+    buttons: ['OK', 'Открыть журнал'],
+    defaultId: 0,
+    cancelId: 0,
+  });
+  if (choice === 1) {
+    shell.openPath(logPath);
+  }
+}
 
 function initAutoUpdater() {
   try {
@@ -325,7 +451,16 @@ function initAutoUpdater() {
   });
 
   autoUpdater.on('error', err => {
-    updaterLog('updater error: ' + (err && err.message));
+    // Full stack to the log; user-facing text depends on check type
+    updaterLog('updater error: ' + ((err && err.stack) || String(err)));
+    if (manualCheckActive) {
+      manualCheckActive = false;
+      showUpdaterErrorDialog(err);
+    } else if (!isNetworkError(err)) {
+      // Silent startup check: notify only about actionable causes;
+      // pure network failures are logged only.
+      showErrorNotification(updaterErrorMessage(err));
+    }
   });
 }
 
@@ -338,9 +473,11 @@ function checkForUpdates(manual = false) {
     if (manual) showInfoNotification('Обновления', 'Проверка доступна только в установленной версии.');
     return;
   }
+  manualCheckActive = manual;
   autoUpdater.checkForUpdates()
     .then(res => {
       if (manual) {
+        manualCheckActive = false;
         const latest = res && res.updateInfo && res.updateInfo.version;
         if (!latest || latest === app.getVersion()) {
           showInfoNotification('Обновления', `У вас последняя версия (${app.getVersion()}).`);
@@ -348,11 +485,15 @@ function checkForUpdates(manual = false) {
       }
     })
     .catch(err => {
-      updaterLog('checkForUpdates failed: ' + (err && err.message));
-      if (manual) {
-        showInfoNotification('Обновления',
-          'Не удалось проверить обновления. Проверьте соединение с интернетом.');
+      updaterLog('checkForUpdates failed: ' + ((err && err.stack) || String(err)));
+      // The 'error' event usually fires for the same failure and already
+      // showed the dialog (resetting manualCheckActive) — avoid doubling.
+      if (manualCheckActive) {
+        manualCheckActive = false;
+        showUpdaterErrorDialog(err);
       }
+      // silent startup check: log only (the 'error' event handler above
+      // additionally notifies about non-network actionable causes)
     });
 }
 
@@ -396,6 +537,7 @@ ipcMain.on('set-auto-update-setting', (_, enabled) => {
 // ── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  buildAppMenu();
   createWindow();
   createTray();
   startFlask();

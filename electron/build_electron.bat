@@ -1,6 +1,6 @@
 @echo off
 setlocal
-echo === Building Судебный Трекер ===
+echo === Building Sud Tracker ===
 cd ..
 
 echo [1/6] Generating 256x256 icons...
@@ -26,8 +26,10 @@ if exist "%PWBROWSERS%" (
 )
 
 echo [5/6] Building Python bundle with PyInstaller...
-:: --paths . и --collect-submodules обязательны: start.py лежит в build\,
-:: и без них PyInstaller не находит пакет court_tracker (ModuleNotFoundError)
+rem --paths . and --collect-submodules are REQUIRED: start.py lives in build\
+rem and without them PyInstaller cannot find the court_tracker package.
+rem NOTE: these flags are mirrored in .github/workflows/release.yml --
+rem update both files in the same commit.
 pyinstaller --onedir --noconsole --noconfirm --name SudTracker_core ^
   --paths . ^
   --collect-submodules court_tracker ^
@@ -54,6 +56,6 @@ goto :eof
 
 :fail
 echo.
-echo === BUILD FAILED — see errors above ===
+echo === BUILD FAILED - see errors above ===
 cd /d "%~dp0"
 exit /b 1
