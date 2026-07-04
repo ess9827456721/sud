@@ -267,6 +267,8 @@ class SyncScheduler:
                         queries.upsert_case_field(conn, case["id"], "judge", ci["judge"])
                     if ci.get("status"):
                         queries.upsert_case_field(conn, case["id"], "status", ci["status"])
+                    if ci.get("court") and not (case["court"] or "").strip():
+                        queries.upsert_case_field(conn, case["id"], "court", ci["court"])
 
                     if result.get("participants"):
                         queries.save_participants(conn, case["id"], result["participants"], smart=True)
