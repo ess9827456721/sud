@@ -211,6 +211,14 @@ class KADScraper:
         return order
 
     @staticmethod
+    def _firefox_requested() -> bool:
+        """True when the KAD engine is pinned to Firefox (setting/env)."""
+        import os
+        pref = (os.environ.get("SUD_KAD_BROWSER")
+                or KADScraper._get_setting("kad_browser") or "").strip().lower()
+        return pref in ("firefox", "ff")
+
+    @staticmethod
     def _headful_requested() -> bool:
         """
         Visible-window mode is on when SUD_KAD_HEADFUL=1 OR the app setting
@@ -312,6 +320,35 @@ class KADScraper:
             return
 
         headless = self._headless and not self._headful_requested()
+
+        # ── Firefox engine: no CDP, so no Runtime.enable leak ───────────────
+        # DDoS-Guard detects Chromium automation via the CDP `Runtime.enable`
+        # command. Playwright drives Firefox over a different protocol
+        # (Juggler) that has no such leak, so the anti-bot check passes where
+        # every Chromium variant fails. Requires `playwright install firefox`.
+        if self._firefox_requested():
+            self._context = self._playwright.firefox.launch_persistent_context(
+                user_data_dir=self._profile_dir() + "_ff",
+                headless=headless,
+                user_agent=USER_AGENT,
+                viewport=VIEWPORT,
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+                firefox_user_prefs={
+                    "dom.webdriver.enabled": False,
+                    "useAutomationExtension": False,
+                    "media.peerconnection.enabled": True,
+                    "general.useragent.override": USER_AGENT,
+                },
+            )
+            self.browser_channel = "firefox"
+            try:
+                self._context.add_init_script(self._STEALTH_JS)
+            except Exception:
+                pass
+            logger.info("KAD browser channel: firefox (headless=%s)", headless)
+            return
+
         args = list(self._LAUNCH_ARGS)
         if self._devtools:
             headless = False  # DevTools requires a visible window

@@ -12,7 +12,10 @@ python -m pip install pyinstaller -q
 python -m pip install -r requirements.txt -q
 if errorlevel 1 goto :fail
 
-echo [3/6] Installing Playwright Chromium...
+echo [3/6] Installing Playwright browsers (Firefox + Chromium)...
+rem Firefox is the primary KAD engine (no CDP Runtime.enable leak that
+rem DDoS-Guard detects); Chromium stays as a fallback.
+playwright install firefox
 playwright install chromium
 
 echo [4/6] Copying Playwright Chromium into project...

@@ -423,7 +423,7 @@ def create_app() -> Flask:
             queries.set_setting(conn, "sync_on_startup", "1" if request.form.get("sync_on_startup") else "0")
             queries.set_setting(conn, "kad_headful", "1" if request.form.get("kad_headful") else "0")
             kad_browser = request.form.get("kad_browser", "auto")
-            if kad_browser not in ("auto", "chrome", "msedge", "chromium"):
+            if kad_browser not in ("auto", "firefox", "chrome", "msedge", "chromium"):
                 kad_browser = "auto"
             queries.set_setting(conn, "kad_browser", kad_browser)
             queries.set_setting(conn, "kad_cdp_url",
