@@ -193,14 +193,65 @@ class KADScraper:
                 last_exc = exc
         raise RuntimeError(f"submit click failed: {last_exc or 'button not found'}")
 
-    def _run_search(self, page, fill_fn) -> Optional[dict]:
+    # POST /Kad/SearchInstances returns an HTML results table (NOT JSON).
+    # Each result row carries an anchor to the case card plus judge/court.
+    _RESULT_CARD_RE = re.compile(
+        r'href="(https?://kad\.arbitr\.ru/Card/([0-9a-fA-F\-]+))"[^>]*'
+        r'class="num_case"[^>]*>\s*([^<]+?)\s*<',
+        re.S,
+    )
+
+    def _parse_search_html(self, html: str) -> list[dict]:
+        """Parse the HTML results table returned by /Kad/SearchInstances."""
+        results: list[dict] = []
+        if not html:
+            return results
+        for block in re.split(r'<tr[\s>]', html):
+            m = self._RESULT_CARD_RE.search(block)
+            if not m:
+                continue
+            kad_url, guid, num = m.group(1), m.group(2), m.group(3)
+            case_number = normalize_case_number(re.sub(r"\s+", "", num))
+
+            mj = re.search(r'class="judge"[^>]*title="([^"]*)"', block)
+            judge = mj.group(1).strip() if mj else None
+
+            # Court = the first <div title="…"> WITHOUT a class (judge/date
+            # divs carry a class); skip anything that looks like a date.
+            court = None
+            for mc in re.finditer(r'<div\s+title="([^"]+)"\s*>', block):
+                val = mc.group(1).strip()
+                if not re.match(r"\d{2}\.\d{2}\.\d{4}", val):
+                    court = val
+                    break
+
+            start_date = None
+            md = re.search(r"<span>(\d{2})\.(\d{2})\.(\d{4})</span>", block)
+            if md:
+                start_date = f"{md.group(3)}-{md.group(2)}-{md.group(1)}"
+
+            results.append({
+                "case_number": case_number,
+                "case_id_kad": guid,
+                "kad_url": kad_url,
+                "court": court,
+                "judge": judge,
+                "start_date": start_date,
+                "source": "kad",
+            })
+        return results
+
+    def _run_search(self, page, fill_fn) -> Optional[list[dict]]:
         """
         Drive the search like a human: fill_fn TYPES the value into the field
         with real keyboard events (which — unlike fill() — register in KAD's
         Backbone model), then _trigger_search either CLICKS the autocomplete
-        suggestion (that runs the search directly in KAD) or, when no suggest
-        appears (a full INN), clicks «Найти». Returns the intercepted
-        SearchInstances JSON.
+        suggestion (that runs the search directly) or, when no suggest appears
+        (a full INN), clicks «Найти». /Kad/SearchInstances returns an HTML
+        results table which we parse.
+
+        Returns: list of case dicts (possibly empty = search ran, 0 results),
+        or None when the search request could not be observed.
         """
         self._dismiss_overlays(page)
         if not fill_fn():
@@ -227,21 +278,12 @@ class KADScraper:
                 self._debug_dump(page, f"http_{resp.status}")
                 self._log_human(resp.status)
                 return None
-            self.last_strategy = "ui-commit"
-            return resp.json()
+
+            html = resp.text()
+            self.last_strategy = "ui-search"
+            return self._parse_search_html(html)
         except Exception as exc:
-            # No XHR fired (or timeout) — regression marker for the fill() bug
-            logger.warning("KAD: no SearchInstances XHR intercepted: %s", exc)
-            try:
-                if page.locator(".b-case-blank__emptyText").first.is_visible(timeout=1000):
-                    self._debug_dump(page, "search_not_run")
-                    self.last_error = (
-                        "КАД не выполнил поиск — возможно, изменился интерфейс. "
-                        "Скриншот и HTML сохранены в debug/."
-                    )
-                    return None
-            except Exception:
-                pass
+            logger.warning("KAD: SearchInstances not observed: %s", exc)
             self._debug_dump(page, "no_xhr")
             self.last_error = (
                 "КАД не выполнил поиск — возможно, изменился интерфейс. "
@@ -303,7 +345,7 @@ class KADScraper:
                 credentials: 'include'
             });
             if (!r.ok) return {__status: r.status};
-            return {__status: 200, data: await r.json()};
+            return {__status: 200, html: await r.text()};
         }"""
         try:
             res = page.evaluate(script, payload)
@@ -315,16 +357,15 @@ class KADScraper:
             return ("rate_limited", None)
         if status != 200:
             return ("fail", None)
-        return ("ok", res.get("data"))
+        return ("ok", res.get("html"))
 
     def _try_replay(self, page, substitute: dict) -> Optional[list]:
-        """Run the replay path; return mapped cases, or None to fall through."""
+        """Run the replay path; return parsed cases, or None to fall through."""
         if not self._load_capture():
             return None
-        status, data = self._replay_search(page, substitute)
+        status, html = self._replay_search(page, substitute)
         if status == "ok":
-            cases = [c for c in (self._item_to_case(i)
-                                 for i in self._api_items(data)) if c]
+            cases = self._parse_search_html(html)
             self.last_strategy = "replay-capture"
             return cases  # possibly empty — an authoritative empty result
         if status == "rate_limited":
@@ -419,79 +460,14 @@ class KADScraper:
             return None
         return str(out)
 
-    # ------------------------------------------------------------------
-    # Hand-crafted fetch — LAST resort only (currently earns HTTP 451)
-    # ------------------------------------------------------------------
-
-    def _api_search(self, page, payload: dict) -> Optional[dict]:
-        """POST /Kad/SearchInstances from within the page context."""
-        script = """async (payload) => {
-            const r = await fetch('/Kad/SearchInstances', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: JSON.stringify(payload)
-            });
-            if (!r.ok) return {__error: r.status};
-            return await r.json();
-        }"""
-        try:
-            data = page.evaluate(script, payload)
-            if isinstance(data, dict) and data.get("__error"):
-                logger.warning("KAD API returned HTTP %s", data["__error"])
-                return None
-            return data
-        except Exception as exc:
-            logger.warning("KAD API search failed: %s", exc)
-            return None
-
     @staticmethod
-    def _api_items(data) -> list:
-        """Extract the items list from the API response defensively."""
-        if not isinstance(data, dict):
-            return []
-        logger.debug("KAD API response top-level keys: %s", list(data.keys()))
-        result = data.get("Result", data)
-        if isinstance(result, dict):
-            for key in ("Items", "items", "Cases"):
-                items = result.get(key)
-                if isinstance(items, list):
-                    return items
-        if isinstance(result, list):
-            return result
-        return []
-
-    @staticmethod
-    def _item_to_case(item) -> Optional[dict]:
-        """Map one API item to our case dict."""
-        if not isinstance(item, dict):
-            return None
-        num = item.get("CaseNumber") or item.get("CaseNo") or item.get("Number")
-        case_id = item.get("CaseId") or item.get("Id") or item.get("caseId")
-        court = item.get("CourtName") or item.get("Court") or ""
-        if isinstance(court, dict):
-            court = court.get("Name") or court.get("Title") or ""
-        judge = item.get("Judge") or ""
-        if isinstance(judge, dict):
-            judge = judge.get("Name") or ""
-        date_raw = item.get("Date") or item.get("StartDate") or ""
-        start_date = None
-        if date_raw:
-            m = re.search(r"\d{4}-\d{2}-\d{2}", str(date_raw))
-            start_date = m.group(0) if m else parse_date_ru(str(date_raw))
-        if not num:
-            return None
-        return {
-            "case_number": normalize_case_number(str(num)),
-            "case_id_kad": str(case_id) if case_id else None,
-            "kad_url": f"{KAD_BASE}/Card/{case_id}" if case_id else None,
-            "court": str(court) or None,
-            "judge": str(judge) or None,
-            "start_date": start_date,
-            "source": "kad",
-        }
+    def _best_case_match(cases: list[dict], target: str) -> dict:
+        """Pick the row whose case number matches the target, else the first."""
+        tnorm = normalize_case_number(target)
+        for c in cases:
+            if c.get("case_number") == tnorm:
+                return c
+        return cases[0]
 
     def _open_main_page(self, page) -> None:
         page.goto(f"{KAD_BASE}/", wait_until="domcontentloaded")
@@ -540,41 +516,16 @@ class KADScraper:
                 # «Найти») in _trigger_search.
                 return self._type_into(page, field, case_number)
 
-            data = self._run_search(page, _fill_case)
-            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
+            cases = self._run_search(page, _fill_case)
             if cases:
-                return cases[0]
-            if data is not None:
+                return self._best_case_match(cases, case_number)
+            if cases is not None:
                 # Search ran but found nothing
                 self.last_error = (
                     f"КАД не нашёл дело {case_number}. Проверьте номер: "
                     "буква А — кириллическая."
                 )
                 return None
-
-            # ── 2. DOM parse of the results page ─────────────────────────
-            try:
-                page.wait_for_load_state("networkidle", timeout=TIMEOUT)
-            except Exception:
-                pass
-            results = self._parse_search_results(page)
-            if results:
-                self.last_strategy = "dom-parse"
-                return results[0]
-
-            # ── 3. Last resort: hand-crafted fetch (currently 451) ───────
-            payload = {
-                "Page": 1, "Count": 25, "Courts": [],
-                "DateFrom": None, "DateTo": None,
-                "Sides": [], "Judges": [],
-                "CaseNumbers": [case_number],
-                "WithVKSInstances": False,
-            }
-            data = self._api_search(page, payload)
-            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
-            if cases:
-                self.last_strategy = "legacy-fetch"
-                return cases[0]
 
             self._debug_dump(page, "search_empty")
             return None
@@ -613,37 +564,12 @@ class KADScraper:
                 # «Найти»; a partial match with a suggest is clicked instead.
                 return self._type_into(page, field, inn)
 
-            data = self._run_search(page, _fill_inn)
-            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
+            cases = self._run_search(page, _fill_inn)
             if cases:
                 return cases
-            if data is not None:
+            if cases is not None:
                 self.last_error = f"КАД не нашёл дел по ИНН {inn}."
                 return []
-
-            # ── 2. DOM parse ──────────────────────────────────────────────
-            try:
-                page.wait_for_load_state("networkidle", timeout=TIMEOUT)
-            except Exception:
-                pass
-            results = self._parse_search_results(page)
-            if results:
-                self.last_strategy = "dom-parse"
-                return results
-
-            # ── 3. Last resort: hand-crafted fetch ────────────────────────
-            payload = {
-                "Page": 1, "Count": 25, "Courts": [],
-                "DateFrom": None, "DateTo": None,
-                "Sides": [{"Name": inn, "Type": -1, "ExactMatch": False}],
-                "Judges": [], "CaseNumbers": [],
-                "WithVKSInstances": False,
-            }
-            data = self._api_search(page, payload)
-            cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
-            if cases:
-                self.last_strategy = "legacy-fetch"
-                return cases
 
             self._debug_dump(page, "inn_empty")
             return []
