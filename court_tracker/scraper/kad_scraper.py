@@ -22,6 +22,7 @@ class KADScraper:
     def __init__(self, headless: bool = True):
         self._browser = None
         self._playwright = None
+        self._context = None  # one shared context per session → one window
         self._headless = headless
         # Human-readable explanation of the last failure — callers put it
         # into sync_log / flash messages.
@@ -100,25 +101,43 @@ class KADScraper:
         )
 
     def _stop(self):
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                pass
         if self._browser:
             self._browser.close()
         if self._playwright:
             self._playwright.stop()
 
     def _new_page(self):
-        context = self._browser.new_context(
-            user_agent=USER_AGENT,
-            viewport=VIEWPORT,
-            locale="ru-RU",
-            timezone_id="Europe/Moscow",
-        )
-        try:
-            context.add_init_script(self._STEALTH_JS)
-        except Exception:
-            pass
-        page = context.new_page()
+        # One shared context for the whole session: reusing it keeps a single
+        # browser window (pages open as tabs) and preserves the DDoS-Guard
+        # cookie validated on the first page load across subsequent searches.
+        if self._context is None:
+            self._context = self._browser.new_context(
+                user_agent=USER_AGENT,
+                viewport=VIEWPORT,
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+            )
+            try:
+                self._context.add_init_script(self._STEALTH_JS)
+            except Exception:
+                pass
+        page = self._context.new_page()
         page.set_default_timeout(TIMEOUT)
         return page
+
+    @staticmethod
+    def _close_page(page) -> None:
+        """Close a page (tab) after use so tabs don't accumulate in a batch."""
+        try:
+            if page is not None:
+                page.close()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Debug artifacts
@@ -596,6 +615,8 @@ class KADScraper:
             if page:
                 self._debug_dump(page, "search_error")
             return None
+        finally:
+            self._close_page(page)
 
     def search_by_inn(self, inn: str) -> list[dict]:
         """Search KAD for all cases involving a party with the given INN."""
@@ -640,6 +661,8 @@ class KADScraper:
             if page:
                 self._debug_dump(page, "inn_error")
             return []
+        finally:
+            self._close_page(page)
 
     # ------------------------------------------------------------------
     # UI fallback (never bare input[type="text"] — it matches the judge field)
@@ -742,6 +765,8 @@ class KADScraper:
             if page:
                 self._debug_dump(page, "card_error")
             return None
+        finally:
+            self._close_page(page)
 
     def _extract_from_card_payloads(self, collected: list[dict]) -> dict:
         """

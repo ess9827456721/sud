@@ -177,51 +177,59 @@ class SyncScheduler:
         from court_tracker.db import queries
         from court_tracker.scraper.kad_scraper import KADScraper
 
-        cases = queries.get_all_cases(conn, {"source": "kad"})
-        for case in cases:
-            if not case.get("kad_url"):
-                continue
+        cases = [c for c in queries.get_all_cases(conn, {"source": "kad"})
+                 if c.get("kad_url")]
+        if not cases:
+            return
+
+        # One shared browser for the whole KAD sync run: each case just opens
+        # its stored kad_url directly (no search) in the same window.
+        with KADScraper() as scraper:
+            for case in cases:
+                self._sync_one_kad_case(conn, scraper, case)
+
+    def _sync_one_kad_case(self, conn, scraper, case) -> None:
+        from court_tracker.db import queries
+        try:
+            details = scraper.get_case_details(case["kad_url"])
+            if not details:
+                return
+            details["case_number"] = case["case_number"]
+            cid = queries.upsert_case(conn, details)
+            queries.save_participants(conn, cid, details.get("participants", []), smart=False)
+
+            old_events = {
+                (e["event_date"], e["event_type"])
+                for e in conn.execute(
+                    "SELECT event_date, event_type FROM events WHERE case_id=?", (cid,)
+                ).fetchall()
+            }
+            queries.save_events(conn, cid, details.get("events", []))
+
+            new_events = [
+                e for e in details.get("events", [])
+                if (e.get("event_date"), e.get("event_type")) not in old_events
+            ]
+            self._run_new_events += len(new_events)
+            for ev in new_events:
+                queries.create_notification(
+                    conn, cid, "new_event",
+                    f"Новое событие в деле {case['case_number']}: "
+                    f"{ev.get('event_type', '')} {ev.get('event_date', '')}",
+                )
+
             try:
-                with KADScraper() as scraper:
-                    details = scraper.get_case_details(case["kad_url"])
-                if not details:
-                    continue
-                details["case_number"] = case["case_number"]
-                cid = queries.upsert_case(conn, details)
-                queries.save_participants(conn, cid, details.get("participants", []), smart=False)
-
-                old_events = {
-                    (e["event_date"], e["event_type"])
-                    for e in conn.execute(
-                        "SELECT event_date, event_type FROM events WHERE case_id=?", (cid,)
-                    ).fetchall()
-                }
-                queries.save_events(conn, cid, details.get("events", []))
-
-                new_events = [
-                    e for e in details.get("events", [])
-                    if (e.get("event_date"), e.get("event_type")) not in old_events
-                ]
-                self._run_new_events += len(new_events)
-                for ev in new_events:
-                    queries.create_notification(
-                        conn, cid, "new_event",
-                        f"Новое событие в деле {case['case_number']}: "
-                        f"{ev.get('event_type', '')} {ev.get('event_date', '')}",
-                    )
-
-                try:
-                    from court_tracker.services.deadline_service import auto_create_deadlines_for_case
-                    auto_create_deadlines_for_case(conn, cid)
-                except Exception as exc:
-                    logger.warning("auto_create_deadlines error case %s: %s", cid, exc)
-
-                queries.log_sync(conn, cid, True, "scheduler KAD sync")
-                self._cases_synced += 1
+                from court_tracker.services.deadline_service import auto_create_deadlines_for_case
+                auto_create_deadlines_for_case(conn, cid)
             except Exception as exc:
-                logger.warning("KAD sync error case %s: %s", case.get("case_number"), exc)
-                queries.log_sync(conn, case["id"], False, str(exc)[:200])
-                self._run_errors += 1
+                logger.warning("auto_create_deadlines error case %s: %s", cid, exc)
+
+            queries.log_sync(conn, cid, True, "scheduler KAD sync")
+            self._cases_synced += 1
+        except Exception as exc:
+            logger.warning("KAD sync error case %s: %s", case.get("case_number"), exc)
+            queries.log_sync(conn, case["id"], False, str(exc)[:200])
+            self._run_errors += 1
 
     # ── SOY sync ─────────────────────────────────────────────────────────────
 
