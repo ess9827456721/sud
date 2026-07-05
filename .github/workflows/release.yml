@@ -58,6 +58,7 @@ jobs:
           --add-data "playwright_browsers;playwright_browsers"
           --hidden-import flask --hidden-import playwright
           --hidden-import playwright.sync_api
+          --collect-all rebrowser_playwright
           build/start.py
 
       # publish config (owner/repo/releaseType: release) comes from

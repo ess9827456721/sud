@@ -40,6 +40,7 @@ pyinstaller --onedir --noconsole --noconfirm --name SudTracker_core ^
   --hidden-import flask ^
   --hidden-import playwright ^
   --hidden-import playwright.sync_api ^
+  --collect-all rebrowser_playwright ^
   build\start.py
 if errorlevel 1 goto :fail
 
