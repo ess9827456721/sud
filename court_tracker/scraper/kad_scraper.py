@@ -173,34 +173,27 @@ class KADScraper:
         """
         KAD's filter fields (#sug-cases / #sug-participants) are tag inputs.
         A committed value becomes a CHIP rendered as `<div class="tag added">`
-        holding a DISABLED <input>/<textarea> (value in the .value property,
-        NOT in textContent) plus an `i.b-icon.remove` button. The original
-        field tag has `i.b-icon.add`. So a `.tag.added` (or any tag carrying
-        a remove button) is the reliable commit signal; when possible we also
-        confirm the chip's field value matches the typed text.
+        holding a DISABLED field + an `i.b-icon.remove` button, while the
+        original editable field tag carries `i.b-icon.add`.
+
+        Detection is by PRESENCE only — a `.tag.added` (or a tag with a remove
+        button). We do NOT compare the chip value: KAD may echo the case
+        number with a Latin/Cyrillic «А» that differs from what we typed, and
+        a value comparison produced false-negative commit_failed reports even
+        though the chip was created. We commit exactly one value per search,
+        so any added chip is ours.
         """
         try:
             return bool(page.evaluate(
-                """(args) => {
-                    const [sel, txt] = args;
-                    const norm = s => (s || '').replace(/\\s+/g, '');
-                    const want = norm(txt);
+                """(sel) => {
                     const cont = document.querySelector(sel);
                     if (!cont) return false;
                     for (const tag of cont.querySelectorAll('.tag')) {
-                        const isChip = tag.classList.contains('added') ||
-                                       tag.querySelector('i.b-icon.remove');
-                        if (!isChip) continue;
-                        const f = tag.querySelector('input, textarea');
-                        const v = f ? norm(f.value) : '';
-                        // value property may be empty in some builds — accept
-                        // the chip itself; otherwise require a loose match
-                        if (!v || !want || v.includes(want) || want.includes(v)) {
-                            return true;
-                        }
+                        if (tag.classList.contains('added') ||
+                            tag.querySelector('i.b-icon.remove')) return true;
                     }
                     return false;
-                }""", [container_sel, text]))
+                }""", container_sel))
         except Exception:
             return False
 
@@ -214,59 +207,78 @@ class KADScraper:
 
     def _commit_input(self, page, container_sel: str, field, text: str) -> bool:
         """
-        Commit the typed value into a KAD tag-input so KAD's own model is
-        updated (a real commit renders a `.tag.added` chip AND clears the
-        input). Order of actions, most reliable first:
-          1. Enter in the field — the human keyboard commit that updates
-             KAD's internal model;
-          2. click the field's «+» add button (i.b-icon.add);
-          3. raw mouse click on «+» at its coordinates.
-        Success = a `.tag.added` chip appears in the container.
+        Commit the typed value into a KAD tag-input, producing a `.tag.added`
+        chip. The commit gesture differs by field type:
+          - «Номер дела» is an <input>  → Enter commits (verified: the chip
+            appears in the dump after Enter);
+          - «Участник дела» is a <textarea> → Enter inserts a NEWLINE and does
+            NOT commit, so the «+» add button must be used.
+        We therefore pick the gesture from the element's tag name, click «+»
+        as the universal fallback, and stop as soon as a chip appears (extra
+        gestures would add duplicate chips). Success = a `.tag.added` chip.
         """
         add_sel = f"{container_sel} i.b-icon.add"
+        try:
+            is_textarea = (field.evaluate("el => el.tagName") or "").lower() == "textarea"
+        except Exception:
+            is_textarea = False
 
         # A suggest dropdown may open while typing — give it a brief moment
         # (optional; never block on it).
         try:
-            page.locator("#b-suggest").wait_for(state="visible", timeout=2000)
+            page.locator("#b-suggest").wait_for(state="visible", timeout=1500)
         except Exception:
             pass
 
-        # 1. Enter on the focused field (updates KAD's model)
-        try:
-            field.click()
-            field.press("Enter")
-        except Exception as exc:
-            logger.debug("KAD: Enter commit failed: %s", exc)
-        if self._wait_committed(page, container_sel, text, tries=10):
-            return True
+        def _click_plus():
+            try:
+                plus = page.locator(add_sel).first
+                if not plus.count():
+                    return False
+                # The «+» is a tiny <i> icon — normal actionability checks can
+                # fail on its size, so force the click and fall back to a
+                # JS-level click dispatch that fires KAD's handler regardless.
+                try:
+                    plus.click(force=True, timeout=2000)
+                    return True
+                except Exception:
+                    pass
+                try:
+                    plus.dispatch_event("click")
+                    return True
+                except Exception:
+                    plus.evaluate("el => el.click()")
+                    return True
+            except Exception as exc:
+                logger.debug("KAD: «+» click failed: %s", exc)
+            return False
 
-        # 2. Click the «+» add button
-        try:
-            plus = page.locator(add_sel).first
-            if plus.count() and plus.is_visible(timeout=1500):
-                plus.click()
-        except Exception as exc:
-            logger.debug("KAD: «+» click failed: %s", exc)
-        if self._wait_committed(page, container_sel, text, tries=10):
-            return True
+        def _mouse_plus():
+            try:
+                plus = page.locator(add_sel).first
+                box = plus.bounding_box() if plus.count() else None
+                if box:
+                    page.mouse.move(box["x"] + box["width"] / 2,
+                                    box["y"] + box["height"] / 2)
+                    page.wait_for_timeout(120)
+                    page.mouse.down(); page.wait_for_timeout(80); page.mouse.up()
+            except Exception as exc:
+                logger.debug("KAD: raw «+» click failed: %s", exc)
 
-        # 3. Raw mouse click on «+» at its coordinates
-        try:
-            plus = page.locator(add_sel).first
-            box = plus.bounding_box() if plus.count() else None
-            if box:
-                cx = box["x"] + box["width"] / 2
-                cy = box["y"] + box["height"] / 2
-                page.mouse.move(cx, cy)
-                page.wait_for_timeout(120)
-                page.mouse.down()
-                page.wait_for_timeout(80)
-                page.mouse.up()
-        except Exception as exc:
-            logger.debug("KAD: raw «+» click failed: %s", exc)
-        if self._wait_committed(page, container_sel, text, tries=10):
-            return True
+        def _enter():
+            try:
+                field.click()
+                field.press("Enter")
+            except Exception as exc:
+                logger.debug("KAD: Enter commit failed: %s", exc)
+
+        # Gesture order: field-appropriate primary, then the alternatives.
+        gestures = ([_click_plus, _enter, _mouse_plus] if is_textarea
+                    else [_enter, _click_plus, _mouse_plus])
+        for gesture in gestures:
+            gesture()
+            if self._wait_committed(page, container_sel, text, tries=10):
+                return True
 
         self._debug_dump(page, "commit_failed")
         logger.error("KAD: value was not committed into %s (no .tag.added chip)",
