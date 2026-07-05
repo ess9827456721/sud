@@ -169,85 +169,92 @@ class KADScraper:
                 last_exc = exc
         raise RuntimeError(f"submit click failed: {last_exc or 'button not found'}")
 
-    def _input_cleared(self, page, locator, text: str) -> bool:
+    def _chip_committed(self, page, container_sel: str, text: str) -> bool:
         """
-        KAD empties the visible input once the combobox commits the choice —
-        "input cleared" is the reliable success signal. Poll up to 3s.
+        KAD's filter fields (#sug-cases / #sug-participants) are tag inputs:
+        a committed value becomes a `.tag` CHIP whose text shows the value.
+        The input/textarea sits in its own empty `.tag`, so a chip carrying
+        the typed text (spaces ignored) is the reliable commit signal.
         """
-        for _ in range(15):
-            try:
-                if (locator.input_value() or "").strip() == "":
-                    # Informational only: did a chip with the text appear?
-                    try:
-                        chip = page.evaluate("""(txt) => {
-                            for (const el of document.querySelectorAll('#b-form *')) {
-                                if (!el.closest('.b-suggest') && el.childElementCount === 0 &&
-                                    el.textContent.trim().includes(txt)) return true;
-                            }
-                            return false;
-                        }""", text)
-                        logger.debug("KAD commit: input cleared, chip visible=%s", chip)
-                    except Exception:
-                        pass
-                    return True
-            except Exception:
-                pass
+        try:
+            return bool(page.evaluate(
+                """(args) => {
+                    const [sel, txt] = args;
+                    const norm = s => (s || '').replace(/\\s+/g, '');
+                    const want = norm(txt);
+                    const cont = document.querySelector(sel);
+                    if (!cont) return false;
+                    for (const tag of cont.querySelectorAll('.tag')) {
+                        if (norm(tag.textContent).includes(want) && want) return true;
+                    }
+                    return false;
+                }""", [container_sel, text]))
+        except Exception:
+            return False
+
+    def _wait_committed(self, page, container_sel: str, text: str,
+                        tries: int = 15) -> bool:
+        for _ in range(tries):
+            if self._chip_committed(page, container_sel, text):
+                return True
             page.wait_for_timeout(200)
         return False
 
-    def _commit_input(self, page, locator, text: str) -> bool:
+    def _commit_input(self, page, container_sel: str, field, text: str) -> bool:
         """
-        Confirm the KAD combobox selection like a human keyboard user:
-        wait for the suggest, ArrowDown (activates keyboard selection),
-        then Enter. Success criterion is the visible input clearing —
-        NOT a DOM text scan (the old check was blind for the INN textarea).
+        Commit the typed value into a KAD tag-input. The canonical action is
+        clicking the field's «+» add button (i.b-icon.add); Enter and a raw
+        mouse click on «+» are fallbacks. Success = a `.tag` chip with the
+        value appears in the container.
         """
-        # 1. Wait for the suggest dropdown to appear
+        add_sel = f"{container_sel} i.b-icon.add"
+
+        # If a suggest dropdown appeared, giving it a moment helps «+» pick
+        # up the highlighted value; it is optional, so never block on it.
         try:
-            page.locator("#b-suggest").wait_for(state="visible", timeout=7000)
+            page.locator("#b-suggest").wait_for(state="visible", timeout=2500)
         except Exception:
-            self._debug_dump(page, "no_suggest")
-            logger.warning("KAD: suggest dropdown never appeared; trying Enter anyway")
+            pass
 
-        # 2. ArrowDown + short pause + Enter (human keyboard confirmation)
+        # 1. Click the «+» add button
         try:
-            locator.press("ArrowDown")
-            page.wait_for_timeout(300)
-            locator.press("Enter")
+            plus = page.locator(add_sel).first
+            if plus.count() and plus.is_visible(timeout=1500):
+                plus.click()
         except Exception as exc:
-            logger.warning("KAD: ArrowDown/Enter failed: %s", exc)
-
-        # 3. Success = input cleared
-        if self._input_cleared(page, locator, text):
+            logger.debug("KAD: «+» click failed: %s", exc)
+        if self._wait_committed(page, container_sel, text, tries=10):
             return True
 
-        # 4. Fallback: click the suggest item with a REAL mouse at coordinates
-        #    (element.click() already proved insufficient — use raw events)
+        # 2. Enter on the field
         try:
-            item = page.locator(
-                "#b-suggest li.active a, #b-suggest li a, .b-suggest li a"
-            ).first
-            if item.is_visible(timeout=1000):
-                box = item.bounding_box()
-                if box:
-                    cx = box["x"] + box["width"] / 2
-                    cy = box["y"] + box["height"] / 2
-                    page.mouse.move(cx, cy)
-                    page.wait_for_timeout(150)
-                    page.mouse.down()
-                    page.wait_for_timeout(80)
-                    page.mouse.up()
+            field.press("Enter")
         except Exception as exc:
-            logger.warning("KAD: raw mouse commit failed: %s", exc)
+            logger.debug("KAD: Enter failed: %s", exc)
+        if self._wait_committed(page, container_sel, text, tries=10):
+            return True
 
-        if self._input_cleared(page, locator, text):
+        # 3. Raw mouse click on «+» at its coordinates
+        try:
+            plus = page.locator(add_sel).first
+            box = plus.bounding_box() if plus.count() else None
+            if box:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                page.mouse.move(cx, cy)
+                page.wait_for_timeout(120)
+                page.mouse.down()
+                page.wait_for_timeout(80)
+                page.mouse.up()
+        except Exception as exc:
+            logger.debug("KAD: raw «+» click failed: %s", exc)
+        if self._wait_committed(page, container_sel, text, tries=10):
             return True
 
         self._debug_dump(page, "commit_failed")
-        logger.error("KAD: input was not committed (field did not clear)")
+        logger.error("KAD: value was not committed into %s (no tag chip)", container_sel)
         self.last_error = (
-            "КАД не засчитал выбор в комбобоксе. Запустите "
-            "'python main.py kad-doctor' для повторного захвата эталона. "
+            "КАД не принял введённое значение в поле фильтра. "
             "Скриншот и HTML сохранены в debug/."
         )
         return False
@@ -603,9 +610,9 @@ class KADScraper:
                     return False
                 if not self._type_into(page, field, case_number):
                     return False
-                # Typed text lives only in the suggest dropdown until
-                # confirmed — commit it into the filter model first.
-                return self._commit_input(page, field, case_number)
+                # Typed text must be committed into a filter tag chip
+                # (via the «+» button) before «Найти» will search.
+                return self._commit_input(page, "#sug-cases", field, case_number)
 
             data = self._run_search(page, _fill_case)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
@@ -678,9 +685,9 @@ class KADScraper:
                     return False
                 if not self._type_into(page, field, inn):
                     return False
-                # Commit like a human: ArrowDown + Enter, input-clear check.
-                # Escape is NEVER pressed (it cancels the pending input).
-                return self._commit_input(page, field, inn)
+                # Commit the participant value into a filter tag chip via
+                # the «+» button. Escape is NEVER pressed (it cancels input).
+                return self._commit_input(page, "#sug-participants", field, inn)
 
             data = self._run_search(page, _fill_inn)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
@@ -727,45 +734,41 @@ class KADScraper:
     # ------------------------------------------------------------------
 
     def _find_case_number_input(self, page):
-        # Live DOM: INPUT with placeholder «например, А50-5568/08», empty id
+        # Live DOM (verified): #sug-cases .tag > input, placeholder
+        # «например, А50-5568/08», empty id
+        for sel in ("#sug-cases input",
+                    "#sug-cases .tag input"):
+            try:
+                el = page.locator(sel).first
+                if el.count() and el.is_visible(timeout=2000):
+                    return el
+            except Exception:
+                pass
         try:
             el = page.get_by_placeholder(re.compile("А50-5568")).first
             if el.is_visible(timeout=2000):
                 return el
         except Exception:
             pass
-        # Container-based fallback
-        for sel in ('div:has-text("Номер дела") input',
-                    'li:has-text("Номер дела") input'):
-            try:
-                el = page.locator(sel).last
-                if el.is_visible(timeout=1500):
-                    ph = (el.get_attribute("placeholder") or "").lower()
-                    if "судь" not in ph:  # never the judge field
-                        return el
-            except Exception:
-                pass
         return None
 
     def _find_inn_input(self, page):
-        # Live DOM: TEXTAREA with placeholder «название, ИНН или ОГРН» —
-        # do not restrict to input
+        # Live DOM (verified): #sug-participants .tag > textarea,
+        # placeholder «название, ИНН или ОГРН»
+        for sel in ("#sug-participants textarea",
+                    "#sug-participants .tag textarea"):
+            try:
+                el = page.locator(sel).first
+                if el.count() and el.is_visible(timeout=2000):
+                    return el
+            except Exception:
+                pass
         try:
             el = page.get_by_placeholder("название, ИНН или ОГРН").first
             if el.is_visible(timeout=2000):
                 return el
         except Exception:
             pass
-        for sel in ('div:has-text("Участник дела") textarea',
-                    'div:has-text("Участник дела") input',
-                    'textarea[placeholder*="ИНН"]',
-                    'input[placeholder*="ИНН"]'):
-            try:
-                el = page.locator(sel).last
-                if el.is_visible(timeout=1500):
-                    return el
-            except Exception:
-                pass
         return None
 
     # ------------------------------------------------------------------
