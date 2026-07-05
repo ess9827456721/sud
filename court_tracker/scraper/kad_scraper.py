@@ -19,11 +19,12 @@ KAD_BASE = "https://kad.arbitr.ru"
 
 
 class KADScraper:
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, devtools: bool = False):
         self._browser = None
         self._playwright = None
         self._context = None  # one shared context per session → one window
         self._headless = headless
+        self._devtools = devtools
         # Human-readable explanation of the last failure — callers put it
         # into sync_log / flash messages.
         self.last_error: Optional[str] = None
@@ -67,6 +68,100 @@ class KADScraper:
         "--disable-dev-shm-usage",
     ]
 
+    # ------------------------------------------------------------------
+    # Interactive network diagnostic (python main.py kad-debug <query>)
+    # ------------------------------------------------------------------
+
+    def debug_search(self, query: str, is_inn: bool = False) -> None:
+        """
+        Run the app's own search flow in a VISIBLE window with DevTools open,
+        log every /Kad/ request+response (status + content-type) to
+        debug/kad_network.log, and keep the window open so the user can
+        inspect the Network tab (Preserve log) — the window no longer closes
+        before they can look.
+        """
+        import time
+        from court_tracker.config import DEBUG_DIR
+
+        log_path = DEBUG_DIR / "kad_network.log"
+        logf = open(log_path, "w", encoding="utf-8")
+
+        def _log(s):
+            print(s)
+            try:
+                logf.write(s + "\n")
+                logf.flush()
+            except Exception:
+                pass
+
+        page = self._new_page()
+
+        def _req(r):
+            try:
+                u = r.url
+                if any(k in u for k in ("/Kad/", "SearchInstances", "captcha")) \
+                        or "ddos" in u.lower():
+                    _log(f"REQ  {r.method} {u}")
+            except Exception:
+                pass
+
+        def _resp(r):
+            try:
+                u = r.url
+                if any(k in u for k in ("/Kad/", "SearchInstances", "captcha")):
+                    ct = ""
+                    try:
+                        ct = (r.headers or {}).get("content-type", "")
+                    except Exception:
+                        pass
+                    _log(f"RESP {r.status} {u}  [{ct}]")
+            except Exception:
+                pass
+
+        page.on("request", _req)
+        page.on("response", _resp)
+
+        _log(f"=== kad-debug: {'ИНН' if is_inn else 'дело'} {query} ===")
+        self._open_main_page(page)
+
+        field = (self._find_inn_input(page) if is_inn
+                 else self._find_case_number_input(page))
+        if field is None:
+            _log("!! Поле ввода не найдено (возможно, изменилась разметка).")
+        else:
+            value = query if is_inn else normalize_case_number(query)
+            self._type_into(page, field, value)
+            try:
+                with page.expect_response(
+                        lambda r: "SearchInstances" in r.url, timeout=15_000) as ri:
+                    trig = self._trigger_search(page)
+                resp = ri.value
+                _log(f">> SearchInstances ОТПРАВЛЕН (триггер: {trig}): HTTP {resp.status}")
+                try:
+                    body = resp.text()
+                    _log(f">> Тело ответа: {len(body)} байт; "
+                         f"num_case={body.count('num_case')}")
+                except Exception as exc:
+                    _log(f">> Не удалось прочитать тело: {exc}")
+            except Exception as exc:
+                _log(f">> SearchInstances НЕ отправлен за 15 c: {exc}")
+                _log(">> Похоже, запрос гасится антиботом ещё до отправки.")
+
+        _log(f"\nСетевой лог сохранён: {log_path}")
+        print("=" * 64)
+        print("Окно оставлено ОТКРЫТЫМ. Откройте F12 → Network, поставьте")
+        print("галочку «Preserve log», повторите поиск руками и посмотрите")
+        print("запрос SearchInstances (Headers/Response).")
+        print("=" * 64)
+        try:
+            input("Когда закончите — нажмите Enter здесь, чтобы закрыть окно…")
+        except Exception:
+            time.sleep(600)
+        try:
+            logf.close()
+        except Exception:
+            pass
+
     @staticmethod
     def _headful_requested() -> bool:
         """
@@ -95,8 +190,11 @@ class KADScraper:
         from playwright.sync_api import sync_playwright
         self._playwright = sync_playwright().start()
         headless = self._headless and not self._headful_requested()
+        if self._devtools:
+            headless = False  # DevTools requires a visible window
         self._browser = self._playwright.chromium.launch(
             headless=headless,
+            devtools=self._devtools,
             args=self._LAUNCH_ARGS,
         )
 

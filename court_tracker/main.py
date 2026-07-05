@@ -6,6 +6,7 @@ Usage:
   python main.py add-inn <INN>
   python main.py add-case <CASE_NUMBER>
   python main.py kad-doctor [CASE_NUMBER]
+  python main.py kad-debug <CASE_NUMBER|INN>
   python main.py list
   python main.py sync <case_id>
   python main.py sync-all
@@ -123,6 +124,16 @@ def cmd_add_case(case_number: str) -> None:
     print(f"{'='*60}\n")
 
 
+def cmd_kad_debug(query: str) -> None:
+    """Open KAD in a visible window with DevTools, log the network, keep it open."""
+    from court_tracker.scraper.kad_scraper import KADScraper
+    is_inn = query.replace(" ", "").isdigit()
+    print(f"kad-debug: запуск видимого окна с DevTools для "
+          f"{'ИНН' if is_inn else 'дела'} {query}…")
+    with KADScraper(headless=False, devtools=True) as scraper:
+        scraper.debug_search(query, is_inn=is_inn)
+
+
 def cmd_kad_doctor(case_number: str = "А60-33087/2025") -> None:
     """One-shot diagnostic capture of KAD's own search request."""
     from court_tracker.scraper.kad_scraper import KADScraper
@@ -222,6 +233,8 @@ def main():
         cmd_add_case(args[1])
     elif cmd == "kad-doctor":
         cmd_kad_doctor(args[1] if len(args) >= 2 else "А60-33087/2025")
+    elif cmd == "kad-debug" and len(args) >= 2:
+        cmd_kad_debug(args[1])
     elif cmd == "list":
         cmd_list()
     elif cmd == "sync" and len(args) >= 2:
