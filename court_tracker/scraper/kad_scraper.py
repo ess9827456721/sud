@@ -190,12 +190,15 @@ class KADScraper:
         from playwright.sync_api import sync_playwright
         self._playwright = sync_playwright().start()
         headless = self._headless and not self._headful_requested()
+        args = list(self._LAUNCH_ARGS)
         if self._devtools:
             headless = False  # DevTools requires a visible window
+            # newer Playwright dropped the launch(devtools=…) arg — open it
+            # via the Chromium flag instead
+            args.append("--auto-open-devtools-for-tabs")
         self._browser = self._playwright.chromium.launch(
             headless=headless,
-            devtools=self._devtools,
-            args=self._LAUNCH_ARGS,
+            args=args,
         )
 
     def _stop(self):
