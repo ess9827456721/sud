@@ -25,6 +25,9 @@ class KADScraper:
         self._context = None  # one shared context per session → one window
         self._headless = headless
         self._devtools = devtools
+        # Which browser engine actually launched (chrome / msedge / chromium)
+        # — logged so the user can see whether a real browser was used.
+        self.browser_channel: Optional[str] = None
         # Human-readable explanation of the last failure — callers put it
         # into sync_log / flash messages.
         self.last_error: Optional[str] = None
@@ -122,6 +125,8 @@ class KADScraper:
         page.on("response", _resp)
 
         _log(f"=== kad-debug: {'ИНН' if is_inn else 'дело'} {query} ===")
+        _log(f">> Браузер: {self.browser_channel or '?'} "
+             f"(chrome/msedge = настоящий, chromium = встроенный/блокируется)")
         self._open_main_page(page)
 
         field = (self._find_inn_input(page) if is_inn
@@ -163,6 +168,47 @@ class KADScraper:
             pass
 
     @staticmethod
+    def _get_setting(key: str) -> Optional[str]:
+        """Read a value from the app `settings` table (None on any failure)."""
+        try:
+            import sqlite3
+            from court_tracker.config import DB_PATH
+            conn = sqlite3.connect(str(DB_PATH))
+            try:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key=?", (key,)
+                ).fetchone()
+            finally:
+                conn.close()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    @classmethod
+    def _channels_to_try(cls) -> list:
+        """
+        Ordered list of browser channels to attempt. kad.arbitr.ru is behind
+        DDoS-Guard's WASM fingerprint, which the Playwright-bundled Chromium
+        fails outright — a REAL installed browser (Chrome/Edge) passes it. So
+        we prefer a real channel and fall back to the bundle only as a last
+        resort. `None` means the bundled Chromium.
+
+        The order can be pinned via the `kad_browser` setting or the
+        SUD_KAD_BROWSER env var (values: chrome / msedge / chromium).
+        """
+        import os
+        pref = (os.environ.get("SUD_KAD_BROWSER")
+                or cls._get_setting("kad_browser") or "").strip().lower()
+        default_order = ["chrome", "msedge", None]
+        if pref in ("chrome", "msedge"):
+            order = [pref] + [c for c in default_order if c != pref]
+        elif pref in ("chromium", "bundled"):
+            order = [None]
+        else:
+            order = default_order
+        return order
+
+    @staticmethod
     def _headful_requested() -> bool:
         """
         Visible-window mode is on when SUD_KAD_HEADFUL=1 OR the app setting
@@ -172,19 +218,23 @@ class KADScraper:
         import os
         if os.environ.get("SUD_KAD_HEADFUL") == "1":
             return True
+        return KADScraper._get_setting("kad_headful") == "1"
+
+    @staticmethod
+    def _profile_dir() -> str:
+        """
+        Persistent user-data dir for the KAD browser profile. A persistent
+        profile keeps the DDoS-Guard cookie/fingerprint valid across app
+        restarts, so the anti-bot check does not have to be re-passed every
+        time.
+        """
+        from court_tracker.config import DATA_DIR
+        p = DATA_DIR / "kad_profile"
         try:
-            import sqlite3
-            from court_tracker.config import DB_PATH
-            conn = sqlite3.connect(str(DB_PATH))
-            try:
-                row = conn.execute(
-                    "SELECT value FROM settings WHERE key='kad_headful'"
-                ).fetchone()
-            finally:
-                conn.close()
-            return bool(row) and row[0] == "1"
+            p.mkdir(parents=True, exist_ok=True)
         except Exception:
-            return False
+            pass
+        return str(p)
 
     def _start(self):
         from playwright.sync_api import sync_playwright
@@ -196,10 +246,44 @@ class KADScraper:
             # newer Playwright dropped the launch(devtools=…) arg — open it
             # via the Chromium flag instead
             args.append("--auto-open-devtools-for-tabs")
-        self._browser = self._playwright.chromium.launch(
-            headless=headless,
-            args=args,
-        )
+
+        # Launch a PERSISTENT context on a REAL installed browser so the
+        # DDoS-Guard WASM fingerprint passes (bundled Chromium is blocked
+        # outright). Try Chrome, then Edge, then the bundled Chromium.
+        user_data_dir = self._profile_dir()
+        last_exc = None
+        for channel in self._channels_to_try():
+            try:
+                kwargs = dict(
+                    user_data_dir=user_data_dir,
+                    headless=headless,
+                    args=args,
+                    user_agent=USER_AGENT,
+                    viewport=VIEWPORT,
+                    locale="ru-RU",
+                    timezone_id="Europe/Moscow",
+                )
+                if channel:
+                    kwargs["channel"] = channel
+                self._context = self._playwright.chromium.launch_persistent_context(
+                    **kwargs
+                )
+                self.browser_channel = channel or "chromium"
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.info("KAD: channel %s unavailable: %s",
+                            channel or "chromium", exc)
+        if self._context is None:
+            raise RuntimeError(
+                f"Не удалось запустить браузер для КАД: {last_exc}"
+            )
+        try:
+            self._context.add_init_script(self._STEALTH_JS)
+        except Exception:
+            pass
+        logger.info("KAD browser channel: %s (headless=%s)",
+                    self.browser_channel, headless)
 
     def _stop(self):
         if self._context:
@@ -207,26 +291,13 @@ class KADScraper:
                 self._context.close()
             except Exception:
                 pass
-        if self._browser:
-            self._browser.close()
         if self._playwright:
             self._playwright.stop()
 
     def _new_page(self):
-        # One shared context for the whole session: reusing it keeps a single
-        # browser window (pages open as tabs) and preserves the DDoS-Guard
-        # cookie validated on the first page load across subsequent searches.
-        if self._context is None:
-            self._context = self._browser.new_context(
-                user_agent=USER_AGENT,
-                viewport=VIEWPORT,
-                locale="ru-RU",
-                timezone_id="Europe/Moscow",
-            )
-            try:
-                self._context.add_init_script(self._STEALTH_JS)
-            except Exception:
-                pass
+        # One shared PERSISTENT context for the whole session: reusing it
+        # keeps a single browser window (pages open as tabs) and preserves the
+        # DDoS-Guard cookie validated on the first page load across searches.
         page = self._context.new_page()
         page.set_default_timeout(TIMEOUT)
         return page
