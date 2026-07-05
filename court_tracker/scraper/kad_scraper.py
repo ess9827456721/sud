@@ -131,6 +131,30 @@ class KADScraper:
             pass
         return True
 
+    def _trigger_search(self, page) -> str:
+        """
+        Start the search the way a human does:
+          - if the autocomplete suggest is showing, CLICK its item — in KAD
+            that runs the search immediately (no «Найти» needed);
+          - otherwise (e.g. a full INN shows no suggest) click «Найти».
+        The «+»/«−» icons are NOT used — they only add a second search row.
+        Returns 'suggest' or 'submit' for logging.
+        """
+        try:
+            page.locator("#b-suggest").wait_for(state="visible", timeout=3500)
+            for sel in ("#b-suggest .body__i li.active a",
+                        "#b-suggest .body__i li a",
+                        "#b-suggest .body__i li",
+                        "#b-suggest li a", "#b-suggest li"):
+                item = page.locator(sel).first
+                if item.count() and item.is_visible(timeout=800):
+                    item.click()
+                    return "suggest"
+        except Exception:
+            pass
+        self._click_submit(page)
+        return "submit"
+
     # ------------------------------------------------------------------
     # Human-readable failure messages (surfaced to sync_log by callers)
     # ------------------------------------------------------------------
@@ -170,32 +194,25 @@ class KADScraper:
         raise RuntimeError(f"submit click failed: {last_exc or 'button not found'}")
 
     def _run_search(self, page, fill_fn) -> Optional[dict]:
-        """Type via fill_fn, click «Найти», return the intercepted JSON."""
+        """
+        Drive the search like a human: fill_fn TYPES the value into the field
+        with real keyboard events (which — unlike fill() — register in KAD's
+        Backbone model), then _trigger_search either CLICKS the autocomplete
+        suggestion (that runs the search directly in KAD) or, when no suggest
+        appears (a full INN), clicks «Найти». Returns the intercepted
+        SearchInstances JSON.
+        """
         self._dismiss_overlays(page)
         if not fill_fn():
             return None
         self._dismiss_overlays(page)
-        class _ClickFailed(Exception):
-            pass
 
         try:
-            try:
-                with page.expect_response(
-                        lambda r: "SearchInstances" in r.url,
-                        timeout=30_000) as resp_info:
-                    try:
-                        self._click_submit(page)
-                    except Exception as exc:
-                        raise _ClickFailed(str(exc)) from exc
-                resp = resp_info.value
-            except _ClickFailed as exc:
-                # Distinguish a click failure from a missing XHR
-                self._debug_dump(page, "click_failed")
-                self.last_error = (
-                    f"КАД: не удалось нажать кнопку «Найти» ({str(exc)[:150]}). "
-                    "Скриншот и HTML сохранены в debug/."
-                )
-                return None
+            with page.expect_response(
+                    lambda r: "SearchInstances" in r.url,
+                    timeout=30_000) as resp_info:
+                self._trigger_search(page)
+            resp = resp_info.value
 
             if resp.status == 451:
                 logger.warning("KAD rate-limited (451) on native request; retry in 45s")
@@ -203,7 +220,7 @@ class KADScraper:
                 with page.expect_response(
                         lambda r: "SearchInstances" in r.url,
                         timeout=30_000) as resp_info2:
-                    self._click_submit(page)
+                    self._trigger_search(page)
                 resp = resp_info2.value
 
             if resp.status != 200:
@@ -518,8 +535,9 @@ class KADScraper:
                     logger.error("KAD UI: case number input not found")
                     self._debug_dump(page, "no_case_input")
                     return False
-                # Typing with real keyboard events is enough — «Найти»
-                # searches by whatever is in the field (no chip needed).
+                # Typing with real keyboard events registers the value; the
+                # search is then triggered by clicking the suggestion (or
+                # «Найти») in _trigger_search.
                 return self._type_into(page, field, case_number)
 
             data = self._run_search(page, _fill_case)
@@ -591,8 +609,8 @@ class KADScraper:
                     logger.error("KAD UI: participant/INN input not found")
                     self._debug_dump(page, "no_inn_input")
                     return False
-                # Typing with real keyboard events is enough — «Найти»
-                # searches by whatever is in the field (no chip needed).
+                # A full INN shows no suggest, so _trigger_search will click
+                # «Найти»; a partial match with a suggest is clicked instead.
                 return self._type_into(page, field, inn)
 
             data = self._run_search(page, _fill_inn)
