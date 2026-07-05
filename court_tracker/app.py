@@ -280,6 +280,7 @@ def create_app() -> Flask:
                         if result and result.get("kad_url"):
                             details = scraper.get_case_details(result["kad_url"])
                         kad_error = scraper.last_error
+                        strategy = scraper.last_strategy
                     if not result:
                         human = kad_error or f"Дело не найдено: {case_number}"
                         queries.log_sync(conn, None, False, human)
@@ -295,7 +296,8 @@ def create_app() -> Flask:
                     if details:
                         queries.save_participants(conn, case_id, details.get("participants", []))
                         _save_events_and_deadlines(conn, case_id, details.get("events", []))
-                    queries.log_sync(conn, case_id, True, "manual add-case")
+                    queries.log_sync(conn, case_id, True,
+                                     f"manual add-case (стратегия: {strategy or '?'})")
                     flash(f"Дело {case_number} добавлено.", "success")
                     return redirect(url_for("case_detail", case_id=case_id))
                 except PWTimeoutError as exc:
@@ -477,6 +479,7 @@ def create_app() -> Flask:
                 if result and result.get("kad_url"):
                     details = scraper.get_case_details(result["kad_url"])
                 kad_error = scraper.last_error
+                strategy = scraper.last_strategy
             if not result:
                 human = kad_error or (
                     f"КАД не нашёл дело {case_number}. Проверьте номер: "
@@ -494,7 +497,8 @@ def create_app() -> Flask:
             if details:
                 queries.save_participants(conn, case_id, details.get("participants", []))
                 _save_events_and_deadlines(conn, case_id, details.get("events", []))
-            queries.log_sync(conn, case_id, True, "manual add-case (json)")
+            queries.log_sync(conn, case_id, True,
+                             f"manual add-case json (стратегия: {strategy or '?'})")
             return jsonify({"success": True, "case_id": case_id,
                             "message": f"Дело {case_number} добавлено."})
         except _sqlite3.IntegrityError as exc:

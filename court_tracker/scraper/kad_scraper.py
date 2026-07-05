@@ -19,12 +19,16 @@ KAD_BASE = "https://kad.arbitr.ru"
 
 
 class KADScraper:
-    def __init__(self):
+    def __init__(self, headless: bool = True):
         self._browser = None
         self._playwright = None
+        self._headless = headless
         # Human-readable explanation of the last failure — callers put it
         # into sync_log / flash messages.
         self.last_error: Optional[str] = None
+        # Name of the strategy that produced the last result (replay-capture
+        # / ui-commit / legacy-fetch) — logged to sync_log by callers.
+        self.last_strategy: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Context manager support
@@ -40,7 +44,7 @@ class KADScraper:
     def _start(self):
         from playwright.sync_api import sync_playwright
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=True)
+        self._browser = self._playwright.chromium.launch(headless=self._headless)
 
     def _stop(self):
         if self._browser:
@@ -165,50 +169,88 @@ class KADScraper:
                 last_exc = exc
         raise RuntimeError(f"submit click failed: {last_exc or 'button not found'}")
 
-    def _commit_input(self, page, locator, text: str) -> bool:
+    def _input_cleared(self, page, locator, text: str) -> bool:
         """
-        Confirm the suggest so the value becomes a filter chip.
-        KAD's filter widget commits typed text to its model only when the
-        suggest entry is confirmed (Enter or click) — clicking «Найти»
-        without confirming discards the text.
+        KAD empties the visible input once the combobox commits the choice —
+        "input cleared" is the reliable success signal. Poll up to 3s.
         """
-        try:
-            item = page.locator("#b-suggest li.active a, .b-suggest li.active a").first
-            if item.is_visible(timeout=2000):
-                item.click()
-            else:
-                locator.press("Enter")
-        except Exception:
+        for _ in range(15):
             try:
-                locator.press("Enter")
+                if (locator.input_value() or "").strip() == "":
+                    # Informational only: did a chip with the text appear?
+                    try:
+                        chip = page.evaluate("""(txt) => {
+                            for (const el of document.querySelectorAll('#b-form *')) {
+                                if (!el.closest('.b-suggest') && el.childElementCount === 0 &&
+                                    el.textContent.trim().includes(txt)) return true;
+                            }
+                            return false;
+                        }""", text)
+                        logger.debug("KAD commit: input cleared, chip visible=%s", chip)
+                    except Exception:
+                        pass
+                    return True
             except Exception:
                 pass
-        page.wait_for_timeout(600)
+            page.wait_for_timeout(200)
+        return False
 
-        # Verify the chip exists: the text must now live OUTSIDE .b-suggest
+    def _commit_input(self, page, locator, text: str) -> bool:
+        """
+        Confirm the KAD combobox selection like a human keyboard user:
+        wait for the suggest, ArrowDown (activates keyboard selection),
+        then Enter. Success criterion is the visible input clearing —
+        NOT a DOM text scan (the old check was blind for the INN textarea).
+        """
+        # 1. Wait for the suggest dropdown to appear
         try:
-            committed = page.evaluate("""(txt) => {
-                const hid = document.querySelector('input[name="caseNumber"]');
-                if (hid && hid.value && hid.value.includes(txt)) return true;
-                // generic: any leaf element outside .b-suggest containing the text
-                for (const el of document.querySelectorAll('#b-form div, #b-form span')) {
-                    if (!el.closest('.b-suggest') && el.childElementCount === 0 &&
-                        el.textContent.trim().includes(txt)) return true;
-                }
-                return false;
-            }""", text)
-        except Exception as exc:
-            logger.warning("KAD: commit verification failed: %s", exc)
-            committed = False
+            page.locator("#b-suggest").wait_for(state="visible", timeout=7000)
+        except Exception:
+            self._debug_dump(page, "no_suggest")
+            logger.warning("KAD: suggest dropdown never appeared; trying Enter anyway")
 
-        if not committed:
-            self._debug_dump(page, "commit_failed")
-            logger.error("KAD: input was not committed to the filter model")
-            self.last_error = (
-                "КАД не принял введённое значение (подсказка не подтвердилась). "
-                "Скриншот и HTML сохранены в debug/."
-            )
-        return bool(committed)
+        # 2. ArrowDown + short pause + Enter (human keyboard confirmation)
+        try:
+            locator.press("ArrowDown")
+            page.wait_for_timeout(300)
+            locator.press("Enter")
+        except Exception as exc:
+            logger.warning("KAD: ArrowDown/Enter failed: %s", exc)
+
+        # 3. Success = input cleared
+        if self._input_cleared(page, locator, text):
+            return True
+
+        # 4. Fallback: click the suggest item with a REAL mouse at coordinates
+        #    (element.click() already proved insufficient — use raw events)
+        try:
+            item = page.locator(
+                "#b-suggest li.active a, #b-suggest li a, .b-suggest li a"
+            ).first
+            if item.is_visible(timeout=1000):
+                box = item.bounding_box()
+                if box:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    page.mouse.move(cx, cy)
+                    page.wait_for_timeout(150)
+                    page.mouse.down()
+                    page.wait_for_timeout(80)
+                    page.mouse.up()
+        except Exception as exc:
+            logger.warning("KAD: raw mouse commit failed: %s", exc)
+
+        if self._input_cleared(page, locator, text):
+            return True
+
+        self._debug_dump(page, "commit_failed")
+        logger.error("KAD: input was not committed (field did not clear)")
+        self.last_error = (
+            "КАД не засчитал выбор в комбобоксе. Запустите "
+            "'python main.py kad-doctor' для повторного захвата эталона. "
+            "Скриншот и HTML сохранены в debug/."
+        )
+        return False
 
     def _run_search(self, page, fill_fn) -> Optional[dict]:
         """Type via fill_fn, click «Найти», return the intercepted JSON."""
@@ -251,6 +293,7 @@ class KADScraper:
                 self._debug_dump(page, f"http_{resp.status}")
                 self._log_human(resp.status)
                 return None
+            self.last_strategy = "ui-commit"
             return resp.json()
         except Exception as exc:
             # No XHR fired (or timeout) — regression marker for the fill() bug
@@ -271,6 +314,176 @@ class KADScraper:
                 "Скриншот и HTML сохранены в debug/."
             )
             return None
+
+    # ------------------------------------------------------------------
+    # Replay of a captured reference request (kad-doctor) — primary API path
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _capture_path():
+        from court_tracker.config import DEBUG_DIR
+        return DEBUG_DIR / "kad_capture.json"
+
+    def _load_capture(self) -> Optional[dict]:
+        import json
+        p = self._capture_path()
+        if not p.exists():
+            return None
+        try:
+            cap = json.loads(p.read_text(encoding="utf-8"))
+            if cap.get("request") and cap["request"].get("url"):
+                return cap
+        except Exception as exc:
+            logger.warning("KAD: cannot read capture file: %s", exc)
+        return None
+
+    def _replay_search(self, page, substitute: dict) -> tuple:
+        """
+        Replay the captured SearchInstances request with the exact headers
+        KAD's own JS attached. `substitute` overrides fields in the captured
+        post_data (e.g. {"CaseNumbers": [...]} / {"Sides": [...]}).
+        Returns (status, data): status in {"ok", "rate_limited", "fail"}.
+        """
+        import json
+        cap = self._load_capture()
+        if not cap:
+            return ("fail", None)
+        req = cap["request"]
+        url = req.get("url")
+        method = req.get("method", "POST")
+        headers = {k: v for k, v in (req.get("headers") or {}).items()
+                   if k.lower() not in ("cookie", "host", "content-length")}
+        try:
+            body_obj = json.loads(req.get("post_data") or "{}")
+        except Exception:
+            body_obj = {}
+        body_obj.update(substitute)
+
+        payload = {"url": url, "method": method,
+                   "headers": headers, "body": json.dumps(body_obj)}
+        script = """async (p) => {
+            const r = await fetch(p.url, {
+                method: p.method,
+                headers: p.headers,
+                body: p.body,
+                credentials: 'include'
+            });
+            if (!r.ok) return {__status: r.status};
+            return {__status: 200, data: await r.json()};
+        }"""
+        try:
+            res = page.evaluate(script, payload)
+        except Exception as exc:
+            logger.warning("KAD replay failed: %s", exc)
+            return ("fail", None)
+        status = res.get("__status") if isinstance(res, dict) else None
+        if status in (451, 403):
+            return ("rate_limited", None)
+        if status != 200:
+            return ("fail", None)
+        return ("ok", res.get("data"))
+
+    def _try_replay(self, page, substitute: dict) -> Optional[list]:
+        """Run the replay path; return mapped cases, or None to fall through."""
+        if not self._load_capture():
+            return None
+        status, data = self._replay_search(page, substitute)
+        if status == "ok":
+            cases = [c for c in (self._item_to_case(i)
+                                 for i in self._api_items(data)) if c]
+            self.last_strategy = "replay-capture"
+            return cases  # possibly empty — an authoritative empty result
+        if status == "rate_limited":
+            logger.warning("KAD replay rate-limited (451/403); fingerprint may have rotated")
+            self.last_error = (
+                "КАД ограничил запросы — отпечаток мог смениться. "
+                "Запустите 'python main.py kad-doctor' для повторного захвата."
+            )
+        return None  # fall through to UI path
+
+    # ------------------------------------------------------------------
+    # Diagnostic capture (kad-doctor)
+    # ------------------------------------------------------------------
+
+    def capture_reference(self, case_number: str = "А60-33087/2025") -> Optional[str]:
+        """
+        One-shot ground-truth capture. Opens KAD (non-headless), lets the
+        user run one manual search, and records the SearchInstances request
+        (method/url/headers/post_data), the response (status + first 2000
+        chars), cookies, and #b-form before/after snapshots into
+        debug/kad_capture.json.
+        """
+        import json
+        import time
+        from court_tracker.config import DEBUG_DIR
+
+        page = self._new_page()
+        captured = {"request": None, "response": None, "cookies": None,
+                    "b_form_before": None, "b_form_after": None}
+
+        def _on_request(req):
+            if captured["request"] is None and "SearchInstances" in req.url:
+                try:
+                    captured["request"] = {
+                        "method": req.method,
+                        "url": req.url,
+                        "headers": dict(req.headers),
+                        "post_data": req.post_data,
+                    }
+                    logger.info("kad-doctor: captured request to %s", req.url)
+                except Exception as exc:
+                    logger.warning("capture request failed: %s", exc)
+
+        def _on_response(resp):
+            if captured["response"] is None and "SearchInstances" in resp.url:
+                try:
+                    body = resp.text()
+                    captured["response"] = {"status": resp.status, "body": body[:2000]}
+                    logger.info("kad-doctor: captured response HTTP %s", resp.status)
+                except Exception as exc:
+                    logger.warning("capture response failed: %s", exc)
+
+        page.on("request", _on_request)
+        page.on("response", _on_response)
+
+        self._open_main_page(page)
+        try:
+            captured["b_form_before"] = page.locator("#b-form").inner_html()
+        except Exception:
+            pass
+
+        print("=" * 64)
+        print("kad-doctor: Выполните поиск вручную в открывшемся окне:")
+        print(f"  введите номер дела {case_number}, выберите подсказку,")
+        print("  нажмите «Найти». Окно закроется само после захвата.")
+        print("=" * 64)
+
+        deadline = time.time() + 300  # wait up to 5 min for the user's search
+        while time.time() < deadline and captured["response"] is None:
+            page.wait_for_timeout(500)
+
+        if captured["response"] is not None:
+            try:
+                captured["b_form_after"] = page.locator("#b-form").inner_html()
+            except Exception:
+                pass
+            try:
+                captured["cookies"] = page.context.cookies()
+            except Exception:
+                pass
+            page.wait_for_timeout(5000)  # let the user see the result
+        else:
+            print("kad-doctor: запрос SearchInstances не был перехвачен за 5 минут.")
+
+        out = DEBUG_DIR / "kad_capture.json"
+        try:
+            out.write_text(json.dumps(captured, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            print(f"kad-doctor: захват сохранён в {out}")
+        except Exception as exc:
+            logger.error("kad-doctor: cannot write capture: %s", exc)
+            return None
+        return str(out)
 
     # ------------------------------------------------------------------
     # Hand-crafted fetch — LAST resort only (currently earns HTTP 451)
@@ -363,10 +576,23 @@ class KADScraper:
         """Search KAD for a specific case number. Returns case dict or None."""
         case_number = normalize_case_number(case_number)
         self.last_error = None
+        self.last_strategy = None
         page = None
         try:
             page = self._new_page()
             self._open_main_page(page)
+
+            # ── 0. Replay from captured reference (kad-doctor) ────────────
+            replay = self._try_replay(page, {"CaseNumbers": [case_number], "Sides": []})
+            if replay is not None:
+                if replay:
+                    return replay[0]
+                # Authoritative empty result from the trusted request
+                self.last_error = (
+                    f"КАД не нашёл дело {case_number}. Проверьте номер: "
+                    "буква А — кириллическая."
+                )
+                return None
 
             # ── 1. UI + interception of the site's own XHR ────────────────
             def _fill_case():
@@ -400,6 +626,7 @@ class KADScraper:
                 pass
             results = self._parse_search_results(page)
             if results:
+                self.last_strategy = "dom-parse"
                 return results[0]
 
             # ── 3. Last resort: hand-crafted fetch (currently 451) ───────
@@ -413,6 +640,7 @@ class KADScraper:
             data = self._api_search(page, payload)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
             if cases:
+                self.last_strategy = "legacy-fetch"
                 return cases[0]
 
             self._debug_dump(page, "search_empty")
@@ -426,10 +654,20 @@ class KADScraper:
     def search_by_inn(self, inn: str) -> list[dict]:
         """Search KAD for all cases involving a party with the given INN."""
         self.last_error = None
+        self.last_strategy = None
         page = None
         try:
             page = self._new_page()
             self._open_main_page(page)
+
+            # ── 0. Replay from captured reference (kad-doctor) ────────────
+            side = {"Name": inn, "Type": -1, "ExactMatch": False}
+            replay = self._try_replay(page, {"Sides": [side], "CaseNumbers": []})
+            if replay is not None:
+                if replay:
+                    return replay
+                self.last_error = f"КАД не нашёл дел по ИНН {inn}."
+                return []
 
             # ── 1. UI + interception ──────────────────────────────────────
             def _fill_inn():
@@ -440,19 +678,8 @@ class KADScraper:
                     return False
                 if not self._type_into(page, field, inn):
                     return False
-                # Escape CANCELS the pending input — never press it here.
-                # If KAD shows the participant suggest with concrete
-                # organizations, click the first item; otherwise commit
-                # the free text with Enter (chip check is generic — the
-                # hidden caseNumber input does not apply to this field).
-                try:
-                    first_item = page.locator("#b-suggest li a, .b-suggest li a").first
-                    if first_item.is_visible(timeout=2000):
-                        first_item.click()
-                        page.wait_for_timeout(600)
-                        return True
-                except Exception:
-                    pass
+                # Commit like a human: ArrowDown + Enter, input-clear check.
+                # Escape is NEVER pressed (it cancels the pending input).
                 return self._commit_input(page, field, inn)
 
             data = self._run_search(page, _fill_inn)
@@ -470,6 +697,7 @@ class KADScraper:
                 pass
             results = self._parse_search_results(page)
             if results:
+                self.last_strategy = "dom-parse"
                 return results
 
             # ── 3. Last resort: hand-crafted fetch ────────────────────────
@@ -483,6 +711,7 @@ class KADScraper:
             data = self._api_search(page, payload)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
             if cases:
+                self.last_strategy = "legacy-fetch"
                 return cases
 
             self._debug_dump(page, "inn_empty")
