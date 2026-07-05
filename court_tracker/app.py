@@ -421,6 +421,7 @@ def create_app() -> Flask:
             new_interval = request.form.get("sync_interval_hours", "2")
             queries.set_setting(conn, "sync_interval_hours", new_interval)
             queries.set_setting(conn, "sync_on_startup", "1" if request.form.get("sync_on_startup") else "0")
+            queries.set_setting(conn, "kad_headful", "1" if request.form.get("kad_headful") else "0")
             if sched:
                 sched.update_interval(float(new_interval))
             flash("Настройки сохранены.", "success")
@@ -428,6 +429,7 @@ def create_app() -> Flask:
         current = {
             "sync_interval_hours": queries.get_setting(conn, "sync_interval_hours", "2"),
             "sync_on_startup": queries.get_setting(conn, "sync_on_startup", "1"),
+            "kad_headful": queries.get_setting(conn, "kad_headful", "0"),
             "app_version": queries.get_setting(conn, "app_version", "2.0"),
         }
         sync_status = sched.get_status() if sched else {}

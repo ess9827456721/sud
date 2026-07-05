@@ -22,6 +22,7 @@ class KADScraper:
     def __init__(self, headless: bool = True):
         self._browser = None
         self._playwright = None
+        self._context = None  # one shared context per session → one window
         self._headless = headless
         # Human-readable explanation of the last failure — callers put it
         # into sync_log / flash messages.
@@ -41,25 +42,102 @@ class KADScraper:
     def __exit__(self, *_):
         self._stop()
 
+    # kad.arbitr.ru sits behind DDoS-Guard, which runs a WASM fingerprint
+    # (window.chrome / navigator.plugins / webdriver / canvas / WebGL). A
+    # plain automated Chromium fails it and its own JS then refuses to send
+    # /Kad/SearchInstances. These anti-detection measures make the browser
+    # look like an ordinary one so the fingerprint passes.
+    _STEALTH_JS = """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        window.chrome = window.chrome || { runtime: {}, app: {}, csi: function(){},
+            loadTimes: function(){} };
+        Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','en-US','en']});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+        const _q = navigator.permissions && navigator.permissions.query;
+        if (_q) navigator.permissions.query = (p) => (
+            p && p.name === 'notifications'
+              ? Promise.resolve({state: Notification.permission})
+              : _q(p));
+    """
+
+    _LAUNCH_ARGS = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+
+    @staticmethod
+    def _headful_requested() -> bool:
+        """
+        Visible-window mode is on when SUD_KAD_HEADFUL=1 OR the app setting
+        `kad_headful` is '1'. DDoS-Guard's WASM fingerprint passes more
+        reliably with a real (non-headless) UI.
+        """
+        import os
+        if os.environ.get("SUD_KAD_HEADFUL") == "1":
+            return True
+        try:
+            import sqlite3
+            from court_tracker.config import DB_PATH
+            conn = sqlite3.connect(str(DB_PATH))
+            try:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key='kad_headful'"
+                ).fetchone()
+            finally:
+                conn.close()
+            return bool(row) and row[0] == "1"
+        except Exception:
+            return False
+
     def _start(self):
         from playwright.sync_api import sync_playwright
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=self._headless)
+        headless = self._headless and not self._headful_requested()
+        self._browser = self._playwright.chromium.launch(
+            headless=headless,
+            args=self._LAUNCH_ARGS,
+        )
 
     def _stop(self):
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                pass
         if self._browser:
             self._browser.close()
         if self._playwright:
             self._playwright.stop()
 
     def _new_page(self):
-        context = self._browser.new_context(
-            user_agent=USER_AGENT,
-            viewport=VIEWPORT,
-        )
-        page = context.new_page()
+        # One shared context for the whole session: reusing it keeps a single
+        # browser window (pages open as tabs) and preserves the DDoS-Guard
+        # cookie validated on the first page load across subsequent searches.
+        if self._context is None:
+            self._context = self._browser.new_context(
+                user_agent=USER_AGENT,
+                viewport=VIEWPORT,
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+            )
+            try:
+                self._context.add_init_script(self._STEALTH_JS)
+            except Exception:
+                pass
+        page = self._context.new_page()
         page.set_default_timeout(TIMEOUT)
         return page
+
+    @staticmethod
+    def _close_page(page) -> None:
+        """Close a page (tab) after use so tabs don't accumulate in a batch."""
+        try:
+            if page is not None:
+                page.close()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Debug artifacts
@@ -187,7 +265,10 @@ class KADScraper:
             try:
                 btn = page.locator(sel).first
                 if btn.count() and btn.is_visible(timeout=1500):
-                    btn.click()
+                    try:
+                        btn.click()
+                    except Exception:
+                        btn.click(force=True)
                     return
             except Exception as exc:
                 last_exc = exc
@@ -534,6 +615,8 @@ class KADScraper:
             if page:
                 self._debug_dump(page, "search_error")
             return None
+        finally:
+            self._close_page(page)
 
     def search_by_inn(self, inn: str) -> list[dict]:
         """Search KAD for all cases involving a party with the given INN."""
@@ -578,6 +661,8 @@ class KADScraper:
             if page:
                 self._debug_dump(page, "inn_error")
             return []
+        finally:
+            self._close_page(page)
 
     # ------------------------------------------------------------------
     # UI fallback (never bare input[type="text"] — it matches the judge field)
@@ -680,6 +765,8 @@ class KADScraper:
             if page:
                 self._debug_dump(page, "card_error")
             return None
+        finally:
+            self._close_page(page)
 
     def _extract_from_card_payloads(self, collected: list[dict]) -> dict:
         """

@@ -13,11 +13,14 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-def check_client(conn: sqlite3.Connection, client) -> dict:
+def check_client(conn: sqlite3.Connection, client, scraper=None) -> dict:
     """
     Search KAD by the client's INN; insert unseen cases into
     client_case_candidates (status='new') and notify about each of them.
     Returns {'client_id', 'found': n, 'new': m}.
+
+    `scraper` — an already-open KADScraper to reuse (so batch runs share one
+    browser window). If None, a temporary one is opened for this call.
     """
     from court_tracker.db import queries
     from court_tracker.scraper.kad_scraper import KADScraper
@@ -29,8 +32,11 @@ def check_client(conn: sqlite3.Connection, client) -> dict:
     if not inn:
         return summary
 
-    with KADScraper() as scraper:
+    if scraper is not None:
         found = scraper.search_by_inn(inn)
+    else:
+        with KADScraper() as own:
+            found = own.search_by_inn(inn)
 
     summary["found"] = len(found)
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
@@ -73,22 +79,30 @@ def check_client(conn: sqlite3.Connection, client) -> dict:
 
 
 def check_all_clients(conn: sqlite3.Connection) -> list[dict]:
-    """Check every monitored client with an INN; polite 3-7s pauses."""
+    """
+    Check every monitored client with an INN in ONE shared browser session
+    (a single window/tab reused for all clients — not one window per client),
+    with polite 3-7s pauses between clients.
+    """
     from court_tracker.db import queries
+    from court_tracker.scraper.kad_scraper import KADScraper
 
     clients = conn.execute(
         "SELECT * FROM clients WHERE kad_monitoring=1 AND inn IS NOT NULL AND inn != ''"
     ).fetchall()
+    if not clients:
+        return []
 
     results = []
-    for i, client in enumerate(clients):
-        try:
-            results.append(check_client(conn, client))
-        except Exception as exc:
-            logger.warning("client monitor error for client %s: %s",
-                           client["id"], exc)
-            queries.log_sync(conn, None, False,
-                             f"КАД-мониторинг клиента {client['name']}: {str(exc)[:150]}")
-        if i < len(clients) - 1:
-            time.sleep(random.uniform(3, 7))  # be polite to KAD
+    with KADScraper() as scraper:  # one browser for the whole run
+        for i, client in enumerate(clients):
+            try:
+                results.append(check_client(conn, client, scraper=scraper))
+            except Exception as exc:
+                logger.warning("client monitor error for client %s: %s",
+                               client["id"], exc)
+                queries.log_sync(conn, None, False,
+                                 f"КАД-мониторинг клиента {client['name']}: {str(exc)[:150]}")
+            if i < len(clients) - 1:
+                time.sleep(random.uniform(3, 7))  # be polite to KAD
     return results
