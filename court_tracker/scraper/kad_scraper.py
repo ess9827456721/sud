@@ -228,6 +228,14 @@ class KADScraper:
         restarts, so the anti-bot check does not have to be re-passed every
         time.
         """
+        import os
+        # Escape hatch: point at an existing (e.g. real Chrome) profile dir.
+        # It must be a profile whose browser is fully closed, or Chrome will
+        # refuse to open it (profile lock).
+        override = (os.environ.get("SUD_KAD_PROFILE_DIR")
+                    or KADScraper._get_setting("kad_profile_dir"))
+        if override:
+            return override
         from court_tracker.config import DATA_DIR
         p = DATA_DIR / "kad_profile"
         try:
@@ -258,6 +266,16 @@ class KADScraper:
                     user_data_dir=user_data_dir,
                     headless=headless,
                     args=args,
+                    # Strip the automation flags Playwright adds by default.
+                    # --enable-automation sets navigator.webdriver=true and is a
+                    # strong bot signal: DDoS-Guard leaves autocomplete working
+                    # but silently disables the search POST when it sees it.
+                    # Real Chrome (launched by the user) never has this flag, so
+                    # KAD search works there but not under vanilla Playwright.
+                    ignore_default_args=[
+                        "--enable-automation",
+                        "--disable-component-extensions-with-background-pages",
+                    ],
                     user_agent=USER_AGENT,
                     viewport=VIEWPORT,
                     locale="ru-RU",
