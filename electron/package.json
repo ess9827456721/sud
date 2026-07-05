@@ -1,6 +1,6 @@
 {
   "name": "sud-tracker",
-  "version": "2.1.6",
+  "version": "2.1.7",
   "description": "Судебный Трекер",
   "main": "main.js",
   "scripts": {
