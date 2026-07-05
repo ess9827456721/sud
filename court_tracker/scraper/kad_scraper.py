@@ -169,126 +169,6 @@ class KADScraper:
                 last_exc = exc
         raise RuntimeError(f"submit click failed: {last_exc or 'button not found'}")
 
-    def _chip_committed(self, page, container_sel: str, text: str) -> bool:
-        """
-        KAD's filter fields (#sug-cases / #sug-participants) are tag inputs.
-        A committed value becomes a CHIP rendered as `<div class="tag added">`
-        holding a DISABLED field + an `i.b-icon.remove` button, while the
-        original editable field tag carries `i.b-icon.add`.
-
-        Detection is by PRESENCE only — a `.tag.added` (or a tag with a remove
-        button). We do NOT compare the chip value: KAD may echo the case
-        number with a Latin/Cyrillic «А» that differs from what we typed, and
-        a value comparison produced false-negative commit_failed reports even
-        though the chip was created. We commit exactly one value per search,
-        so any added chip is ours.
-        """
-        try:
-            return bool(page.evaluate(
-                """(sel) => {
-                    const cont = document.querySelector(sel);
-                    if (!cont) return false;
-                    for (const tag of cont.querySelectorAll('.tag')) {
-                        if (tag.classList.contains('added') ||
-                            tag.querySelector('i.b-icon.remove')) return true;
-                    }
-                    return false;
-                }""", container_sel))
-        except Exception:
-            return False
-
-    def _wait_committed(self, page, container_sel: str, text: str,
-                        tries: int = 15) -> bool:
-        for _ in range(tries):
-            if self._chip_committed(page, container_sel, text):
-                return True
-            page.wait_for_timeout(200)
-        return False
-
-    def _commit_input(self, page, container_sel: str, field, text: str) -> bool:
-        """
-        Commit the typed value into a KAD tag-input, producing a `.tag.added`
-        chip. The commit gesture differs by field type:
-          - «Номер дела» is an <input>  → Enter commits (verified: the chip
-            appears in the dump after Enter);
-          - «Участник дела» is a <textarea> → Enter inserts a NEWLINE and does
-            NOT commit, so the «+» add button must be used.
-        We therefore pick the gesture from the element's tag name, click «+»
-        as the universal fallback, and stop as soon as a chip appears (extra
-        gestures would add duplicate chips). Success = a `.tag.added` chip.
-        """
-        add_sel = f"{container_sel} i.b-icon.add"
-        try:
-            is_textarea = (field.evaluate("el => el.tagName") or "").lower() == "textarea"
-        except Exception:
-            is_textarea = False
-
-        # A suggest dropdown may open while typing — give it a brief moment
-        # (optional; never block on it).
-        try:
-            page.locator("#b-suggest").wait_for(state="visible", timeout=1500)
-        except Exception:
-            pass
-
-        def _click_plus():
-            try:
-                plus = page.locator(add_sel).first
-                if not plus.count():
-                    return False
-                # The «+» is a tiny <i> icon — normal actionability checks can
-                # fail on its size, so force the click and fall back to a
-                # JS-level click dispatch that fires KAD's handler regardless.
-                try:
-                    plus.click(force=True, timeout=2000)
-                    return True
-                except Exception:
-                    pass
-                try:
-                    plus.dispatch_event("click")
-                    return True
-                except Exception:
-                    plus.evaluate("el => el.click()")
-                    return True
-            except Exception as exc:
-                logger.debug("KAD: «+» click failed: %s", exc)
-            return False
-
-        def _mouse_plus():
-            try:
-                plus = page.locator(add_sel).first
-                box = plus.bounding_box() if plus.count() else None
-                if box:
-                    page.mouse.move(box["x"] + box["width"] / 2,
-                                    box["y"] + box["height"] / 2)
-                    page.wait_for_timeout(120)
-                    page.mouse.down(); page.wait_for_timeout(80); page.mouse.up()
-            except Exception as exc:
-                logger.debug("KAD: raw «+» click failed: %s", exc)
-
-        def _enter():
-            try:
-                field.click()
-                field.press("Enter")
-            except Exception as exc:
-                logger.debug("KAD: Enter commit failed: %s", exc)
-
-        # Gesture order: field-appropriate primary, then the alternatives.
-        gestures = ([_click_plus, _enter, _mouse_plus] if is_textarea
-                    else [_enter, _click_plus, _mouse_plus])
-        for gesture in gestures:
-            gesture()
-            if self._wait_committed(page, container_sel, text, tries=10):
-                return True
-
-        self._debug_dump(page, "commit_failed")
-        logger.error("KAD: value was not committed into %s (no .tag.added chip)",
-                     container_sel)
-        self.last_error = (
-            "КАД не принял введённое значение в поле фильтра. "
-            "Скриншот и HTML сохранены в debug/."
-        )
-        return False
-
     def _run_search(self, page, fill_fn) -> Optional[dict]:
         """Type via fill_fn, click «Найти», return the intercepted JSON."""
         self._dismiss_overlays(page)
@@ -638,11 +518,9 @@ class KADScraper:
                     logger.error("KAD UI: case number input not found")
                     self._debug_dump(page, "no_case_input")
                     return False
-                if not self._type_into(page, field, case_number):
-                    return False
-                # Typed text must be committed into a filter tag chip
-                # (via the «+» button) before «Найти» will search.
-                return self._commit_input(page, "#sug-cases", field, case_number)
+                # Typing with real keyboard events is enough — «Найти»
+                # searches by whatever is in the field (no chip needed).
+                return self._type_into(page, field, case_number)
 
             data = self._run_search(page, _fill_case)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
@@ -713,11 +591,9 @@ class KADScraper:
                     logger.error("KAD UI: participant/INN input not found")
                     self._debug_dump(page, "no_inn_input")
                     return False
-                if not self._type_into(page, field, inn):
-                    return False
-                # Commit the participant value into a filter tag chip via
-                # the «+» button. Escape is NEVER pressed (it cancels input).
-                return self._commit_input(page, "#sug-participants", field, inn)
+                # Typing with real keyboard events is enough — «Найти»
+                # searches by whatever is in the field (no chip needed).
+                return self._type_into(page, field, inn)
 
             data = self._run_search(page, _fill_inn)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
