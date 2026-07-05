@@ -752,38 +752,37 @@ class KADScraper:
     # ------------------------------------------------------------------
 
     def _find_case_number_input(self, page):
-        # Live DOM (verified): #sug-cases .tag > input, placeholder
-        # «например, А50-5568/08», empty id
-        for sel in ("#sug-cases input",
-                    "#sug-cases .tag input"):
+        # «Номер дела» field: editable (non-disabled) input in #sug-cases,
+        # placeholder «например, А50-5568/08». :not([disabled]) skips the
+        # disabled input inside an already-committed .tag.added chip.
+        for sel in ("#sug-cases input:not([disabled])",
+                    "input[placeholder*='5568']:not([disabled])"):
             try:
                 el = page.locator(sel).first
                 if el.count() and el.is_visible(timeout=2000):
                     return el
             except Exception:
                 pass
-        try:
-            el = page.get_by_placeholder(re.compile("А50-5568")).first
-            if el.is_visible(timeout=2000):
-                return el
-        except Exception:
-            pass
         return None
 
     def _find_inn_input(self, page):
-        # Live DOM (verified): #sug-participants .tag > textarea,
-        # placeholder «название, ИНН или ОГРН»
-        for sel in ("#sug-participants textarea",
-                    "#sug-participants .tag textarea"):
+        # Top «Участник дела» field — «название, ИНН или ОГРН». The client
+        # INN search MUST land here (not in «Номер дела»/«Судья»). It is the
+        # editable (non-disabled) TEXTAREA in #sug-participants; the disabled
+        # textarea inside a committed chip is excluded via :not([disabled]).
+        for sel in ("#sug-participants textarea:not([disabled])",
+                    "textarea[placeholder*='ОГРН']:not([disabled])",
+                    "textarea[placeholder*='ИНН']:not([disabled])"):
             try:
                 el = page.locator(sel).first
                 if el.count() and el.is_visible(timeout=2000):
                     return el
             except Exception:
                 pass
+        # Placeholder anchor as a last resort
         try:
-            el = page.get_by_placeholder("название, ИНН или ОГРН").first
-            if el.is_visible(timeout=2000):
+            el = page.get_by_placeholder(re.compile("ИНН|ОГРН")).first
+            if el.count() and el.is_visible(timeout=2000):
                 return el
         except Exception:
             pass
