@@ -25,6 +25,7 @@ class KADScraper:
         self._context = None  # one shared context per session → one window
         self._headless = headless
         self._devtools = devtools
+        self._cdp_attached = False  # True when attached to a user-run Chrome
         # Which browser engine actually launched (chrome / msedge / chromium)
         # — logged so the user can see whether a real browser was used.
         self.browser_channel: Optional[str] = None
@@ -244,9 +245,43 @@ class KADScraper:
             pass
         return str(p)
 
+    @staticmethod
+    def _cdp_url() -> Optional[str]:
+        """
+        If set, attach to a Chrome the USER launched themselves (with
+        --remote-debugging-port) instead of launching one. That browser has a
+        100% human environment (real profile, no automation flags), so
+        DDoS-Guard's WASM does not disable the search. Value example:
+        http://127.0.0.1:9222  (env SUD_KAD_CDP or setting kad_cdp_url).
+        """
+        import os
+        val = (os.environ.get("SUD_KAD_CDP")
+               or KADScraper._get_setting("kad_cdp_url") or "").strip()
+        if not val:
+            return None
+        if val.isdigit():
+            val = f"http://127.0.0.1:{val}"
+        return val
+
     def _start(self):
         from playwright.sync_api import sync_playwright
         self._playwright = sync_playwright().start()
+
+        # ── CDP-attach mode: connect to a user-launched Chrome ──────────────
+        cdp = self._cdp_url()
+        if cdp:
+            self._browser = self._playwright.chromium.connect_over_cdp(cdp)
+            self._cdp_attached = True
+            ctxs = self._browser.contexts
+            self._context = ctxs[0] if ctxs else self._browser.new_context()
+            self.browser_channel = "cdp"
+            try:
+                self._context.add_init_script(self._STEALTH_JS)
+            except Exception:
+                pass
+            logger.info("KAD: attached over CDP to %s", cdp)
+            return
+
         headless = self._headless and not self._headful_requested()
         args = list(self._LAUNCH_ARGS)
         if self._devtools:
@@ -304,7 +339,15 @@ class KADScraper:
                     self.browser_channel, headless)
 
     def _stop(self):
-        if self._context:
+        # In CDP-attach mode the user owns the browser — never close it, only
+        # disconnect. Otherwise close the context/browser we launched.
+        if self._cdp_attached:
+            try:
+                if self._browser:
+                    self._browser.close()  # closes the CDP connection, not Chrome
+            except Exception:
+                pass
+        elif self._context:
             try:
                 self._context.close()
             except Exception:
@@ -313,16 +356,26 @@ class KADScraper:
             self._playwright.stop()
 
     def _new_page(self):
-        # One shared PERSISTENT context for the whole session: reusing it
-        # keeps a single browser window (pages open as tabs) and preserves the
-        # DDoS-Guard cookie validated on the first page load across searches.
+        # One shared context for the whole session: reusing it keeps a single
+        # browser window (pages open as tabs) and preserves the DDoS-Guard
+        # cookie validated on the first page load across searches.
+        # In CDP-attach mode, reuse the tab the user already has open so we
+        # drive their live, human-validated session instead of a blank tab.
+        if self._cdp_attached:
+            pages = [p for p in self._context.pages if not p.is_closed()]
+            if pages:
+                page = pages[0]
+                page.set_default_timeout(TIMEOUT)
+                return page
         page = self._context.new_page()
         page.set_default_timeout(TIMEOUT)
         return page
 
-    @staticmethod
-    def _close_page(page) -> None:
-        """Close a page (tab) after use so tabs don't accumulate in a batch."""
+    def _close_page(self, page) -> None:
+        """Close a page (tab) after use so tabs don't accumulate in a batch.
+        In CDP-attach mode the tab belongs to the user — leave it open."""
+        if self._cdp_attached:
+            return
         try:
             if page is not None:
                 page.close()

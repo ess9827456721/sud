@@ -89,6 +89,24 @@
           </div>
         </div>
 
+        <div class="form-group">
+          <label class="form-label">КАД: подключение к своему браузеру (CDP)</label>
+          <input type="text" name="kad_cdp_url" class="form-control"
+                 style="max-width:320px" placeholder="например, 9222 или http://127.0.0.1:9222"
+                 value="{{ settings.kad_cdp_url }}">
+          <div class="text-small text-muted mt-1">
+            Самый надёжный режим, если поиск по КАД не работает. Антибот
+            DDoS-Guard отключает поиск в браузере, запущенном автоматикой.
+            Запустите Chrome сами командой (Chrome должен быть полностью
+            закрыт):<br>
+            <code>chrome.exe --remote-debugging-port=9222
+            --user-data-dir=%APPDATA%\SudTracker\kad_profile</code><br>
+            один раз пройдите КАД руками (если попросит), впишите сюда
+            <code>9222</code> — приложение будет искать в этом окне.
+            Пусто = обычный режим (приложение само запускает браузер).
+          </div>
+        </div>
+
         <div class="form-group text-muted" style="font-size:12px">
           Версия приложения: <span id="app-version-label">{{ settings.app_version }}</span>
         </div>

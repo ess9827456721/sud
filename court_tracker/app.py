@@ -426,6 +426,8 @@ def create_app() -> Flask:
             if kad_browser not in ("auto", "chrome", "msedge", "chromium"):
                 kad_browser = "auto"
             queries.set_setting(conn, "kad_browser", kad_browser)
+            queries.set_setting(conn, "kad_cdp_url",
+                                (request.form.get("kad_cdp_url") or "").strip())
             if sched:
                 sched.update_interval(float(new_interval))
             flash("Настройки сохранены.", "success")
@@ -435,6 +437,7 @@ def create_app() -> Flask:
             "sync_on_startup": queries.get_setting(conn, "sync_on_startup", "1"),
             "kad_headful": queries.get_setting(conn, "kad_headful", "0"),
             "kad_browser": queries.get_setting(conn, "kad_browser", "auto"),
+            "kad_cdp_url": queries.get_setting(conn, "kad_cdp_url", ""),
             "app_version": queries.get_setting(conn, "app_version", "2.0"),
         }
         sync_status = sched.get_status() if sched else {}
