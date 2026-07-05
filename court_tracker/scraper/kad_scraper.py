@@ -26,6 +26,7 @@ class KADScraper:
         self._headless = headless
         self._devtools = devtools
         self._cdp_attached = False  # True when attached to a user-run Chrome
+        self._patched = False  # True when the rebrowser-playwright build is used
         # Which browser engine actually launched (chrome / msedge / chromium)
         # — logged so the user can see whether a real browser was used.
         self.browser_channel: Optional[str] = None
@@ -210,6 +211,14 @@ class KADScraper:
         return order
 
     @staticmethod
+    def _firefox_requested() -> bool:
+        """True when the KAD engine is pinned to Firefox (setting/env)."""
+        import os
+        pref = (os.environ.get("SUD_KAD_BROWSER")
+                or KADScraper._get_setting("kad_browser") or "").strip().lower()
+        return pref in ("firefox", "ff")
+
+    @staticmethod
     def _headful_requested() -> bool:
         """
         Visible-window mode is on when SUD_KAD_HEADFUL=1 OR the app setting
@@ -263,8 +272,36 @@ class KADScraper:
             val = f"http://127.0.0.1:{val}"
         return val
 
+    @staticmethod
+    def _import_sync_playwright():
+        """
+        Prefer the patched `rebrowser-playwright` build, which removes the
+        `Runtime.enable` CDP leak that DDoS-Guard (like Cloudflare/DataDome)
+        uses to detect automation — on kad.arbitr.ru that leak makes the WASM
+        silently disable the search. Fall back to vanilla Playwright if the
+        patched package is not installed (KAD search will then be blocked, but
+        everything else still works).
+
+        Install the patched build with:  pip install rebrowser-playwright
+        """
+        import os
+        # addBinding is the most reliable runtime-fix mode of the patches.
+        os.environ.setdefault("REBROWSER_PATCHES_RUNTIME_FIX_MODE", "addBinding")
+        try:
+            from rebrowser_playwright.sync_api import sync_playwright
+            logger.info("KAD: using patched rebrowser-playwright (Runtime.enable fix)")
+            return sync_playwright, True
+        except Exception:
+            from playwright.sync_api import sync_playwright
+            logger.warning(
+                "KAD: rebrowser-playwright не установлен — CDP-утечка "
+                "Runtime.enable активна, поиск КАД может блокироваться "
+                "антиботом. Установите: pip install rebrowser-playwright"
+            )
+            return sync_playwright, False
+
     def _start(self):
-        from playwright.sync_api import sync_playwright
+        sync_playwright, self._patched = self._import_sync_playwright()
         self._playwright = sync_playwright().start()
 
         # ── CDP-attach mode: connect to a user-launched Chrome ──────────────
@@ -283,6 +320,35 @@ class KADScraper:
             return
 
         headless = self._headless and not self._headful_requested()
+
+        # ── Firefox engine: no CDP, so no Runtime.enable leak ───────────────
+        # DDoS-Guard detects Chromium automation via the CDP `Runtime.enable`
+        # command. Playwright drives Firefox over a different protocol
+        # (Juggler) that has no such leak, so the anti-bot check passes where
+        # every Chromium variant fails. Requires `playwright install firefox`.
+        if self._firefox_requested():
+            self._context = self._playwright.firefox.launch_persistent_context(
+                user_data_dir=self._profile_dir() + "_ff",
+                headless=headless,
+                user_agent=USER_AGENT,
+                viewport=VIEWPORT,
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+                firefox_user_prefs={
+                    "dom.webdriver.enabled": False,
+                    "useAutomationExtension": False,
+                    "media.peerconnection.enabled": True,
+                    "general.useragent.override": USER_AGENT,
+                },
+            )
+            self.browser_channel = "firefox"
+            try:
+                self._context.add_init_script(self._STEALTH_JS)
+            except Exception:
+                pass
+            logger.info("KAD browser channel: firefox (headless=%s)", headless)
+            return
+
         args = list(self._LAUNCH_ARGS)
         if self._devtools:
             headless = False  # DevTools requires a visible window

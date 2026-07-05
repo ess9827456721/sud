@@ -35,8 +35,10 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
-      - name: Install Playwright Chromium
-        run: playwright install chromium
+      - name: Install Playwright browsers (Firefox + Chromium)
+        run: |
+          playwright install firefox
+          playwright install chromium
 
       - name: Copy Playwright browsers into project
         shell: pwsh
@@ -58,6 +60,7 @@ jobs:
           --add-data "playwright_browsers;playwright_browsers"
           --hidden-import flask --hidden-import playwright
           --hidden-import playwright.sync_api
+          --collect-all rebrowser_playwright
           build/start.py
 
       # publish config (owner/repo/releaseType: release) comes from

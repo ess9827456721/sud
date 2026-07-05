@@ -1,4 +1,8 @@
 playwright>=1.40
+# Пропатченный Playwright без утечки Runtime.enable — нужен, чтобы поиск по
+# КАД (kad.arbitr.ru за DDoS-Guard) не блокировался антиботом. Если пакет не
+# установлен, KADScraper молча откатывается на обычный playwright.
+rebrowser-playwright>=1.40
 flask>=3.0
 python-dotenv
 openpyxl>=3.1
