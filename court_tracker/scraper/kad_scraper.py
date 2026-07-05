@@ -131,6 +131,47 @@ class KADScraper:
             pass
         return True
 
+    def _confirm_suggest(self, page, field) -> None:
+        """
+        After typing, KAD shows an autocomplete suggest with the match
+        highlighted. The value is registered in KAD's Backbone model ONLY
+        when the suggestion is CONFIRMED — clicking «Найти» without confirming
+        just resets the field (verified: search_not_run with an empty model).
+        A human confirms by clicking the highlighted row or pressing Enter.
+
+        Best-effort: click the first/active suggest item; fall back to
+        ArrowDown+Enter. Never raise — the SearchInstances XHR on «Найти» is
+        the real success signal.
+        """
+        try:
+            page.locator("#b-suggest").wait_for(state="visible", timeout=6000)
+            shown = True
+        except Exception:
+            shown = False
+
+        if shown:
+            for sel in ("#b-suggest .body__i li.active a",
+                        "#b-suggest .body__i li a",
+                        "#b-suggest .body__i li",
+                        "#b-suggest li a", "#b-suggest li"):
+                try:
+                    item = page.locator(sel).first
+                    if item.count() and item.is_visible(timeout=1000):
+                        item.click()
+                        page.wait_for_timeout(400)
+                        return
+                except Exception:
+                    pass
+
+        # Keyboard fallback: highlight the first item and confirm it.
+        try:
+            field.press("ArrowDown")
+            page.wait_for_timeout(150)
+            field.press("Enter")
+            page.wait_for_timeout(400)
+        except Exception as exc:
+            logger.debug("KAD: suggest confirm fallback failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Human-readable failure messages (surfaced to sync_log by callers)
     # ------------------------------------------------------------------
@@ -518,9 +559,12 @@ class KADScraper:
                     logger.error("KAD UI: case number input not found")
                     self._debug_dump(page, "no_case_input")
                     return False
-                # Typing with real keyboard events is enough — «Найти»
-                # searches by whatever is in the field (no chip needed).
-                return self._type_into(page, field, case_number)
+                if not self._type_into(page, field, case_number):
+                    return False
+                # Confirm the autocomplete suggestion so KAD registers the
+                # value in its model; «Найти» resets the field otherwise.
+                self._confirm_suggest(page, field)
+                return True
 
             data = self._run_search(page, _fill_case)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
@@ -591,9 +635,12 @@ class KADScraper:
                     logger.error("KAD UI: participant/INN input not found")
                     self._debug_dump(page, "no_inn_input")
                     return False
-                # Typing with real keyboard events is enough — «Найти»
-                # searches by whatever is in the field (no chip needed).
-                return self._type_into(page, field, inn)
+                if not self._type_into(page, field, inn):
+                    return False
+                # Confirm the autocomplete suggestion so KAD registers the
+                # value in its model; «Найти» resets the field otherwise.
+                self._confirm_suggest(page, field)
+                return True
 
             data = self._run_search(page, _fill_inn)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
