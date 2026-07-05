@@ -131,46 +131,85 @@ class KADScraper:
             pass
         return True
 
-    def _confirm_suggest(self, page, field) -> None:
-        """
-        After typing, KAD shows an autocomplete suggest with the match
-        highlighted. The value is registered in KAD's Backbone model ONLY
-        when the suggestion is CONFIRMED — clicking «Найти» without confirming
-        just resets the field (verified: search_not_run with an empty model).
-        A human confirms by clicking the highlighted row or pressing Enter.
-
-        Best-effort: click the first/active suggest item; fall back to
-        ArrowDown+Enter. Never raise — the SearchInstances XHR on «Найти» is
-        the real success signal.
-        """
+    def _has_chip(self, page, container_sel: str) -> bool:
+        """A committed value shows as `<div class="tag added">` (with an
+        i.b-icon.remove), distinct from the editable field's tag (i.b-icon.add)."""
         try:
-            page.locator("#b-suggest").wait_for(state="visible", timeout=6000)
-            shown = True
+            return bool(page.evaluate(
+                """(sel) => {
+                    const c = document.querySelector(sel);
+                    if (!c) return false;
+                    for (const t of c.querySelectorAll('.tag'))
+                        if (t.classList.contains('added') ||
+                            t.querySelector('i.b-icon.remove')) return true;
+                    return false;
+                }""", container_sel))
         except Exception:
-            shown = False
+            return False
 
-        if shown:
+    def _click_add(self, page, container_sel: str) -> None:
+        """Click the field's «+» add button (tiny <i> icon) robustly."""
+        sel = f"{container_sel} i.b-icon.add"
+        try:
+            plus = page.locator(sel).first
+            if not plus.count():
+                return
+            try:
+                plus.click(force=True, timeout=2000)
+                return
+            except Exception:
+                pass
+            try:
+                plus.dispatch_event("click")
+            except Exception:
+                plus.evaluate("el => el.click()")
+        except Exception as exc:
+            logger.debug("KAD: «+» add-click failed: %s", exc)
+
+    def _commit_field(self, page, container_sel: str, field) -> bool:
+        """
+        Register the typed value in KAD's model. The gesture depends on
+        whether an autocomplete suggest appears:
+          - CASE NUMBER: a suggest with the match appears → confirm it
+            (click the highlighted row / Enter);
+          - FULL INN in «Участник дела»: NO suggest appears → commit via the
+            field's «+» add button (the participant field is a <textarea>,
+            where Enter would only insert a newline).
+        A committed value becomes a `.tag.added` chip — the success signal.
+        We try suggest-confirm, then «+», then Enter, stopping at the chip;
+        if none appears we still return (the «Найти» XHR is the final judge).
+        """
+        # 1. Autocomplete suggest, if it shows up quickly
+        try:
+            page.locator("#b-suggest").wait_for(state="visible", timeout=3500)
             for sel in ("#b-suggest .body__i li.active a",
                         "#b-suggest .body__i li a",
                         "#b-suggest .body__i li",
                         "#b-suggest li a", "#b-suggest li"):
-                try:
-                    item = page.locator(sel).first
-                    if item.count() and item.is_visible(timeout=1000):
-                        item.click()
-                        page.wait_for_timeout(400)
-                        return
-                except Exception:
-                    pass
+                item = page.locator(sel).first
+                if item.count() and item.is_visible(timeout=800):
+                    item.click()
+                    page.wait_for_timeout(400)
+                    break
+        except Exception:
+            pass
+        if self._has_chip(page, container_sel):
+            return True
 
-        # Keyboard fallback: highlight the first item and confirm it.
+        # 2. No suggest (full INN) → the «+» add button commits the value
+        self._click_add(page, container_sel)
+        page.wait_for_timeout(400)
+        if self._has_chip(page, container_sel):
+            return True
+
+        # 3. Keyboard fallback (works for the case <input>)
         try:
-            field.press("ArrowDown")
-            page.wait_for_timeout(150)
+            field.click()
             field.press("Enter")
-            page.wait_for_timeout(400)
-        except Exception as exc:
-            logger.debug("KAD: suggest confirm fallback failed: %s", exc)
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+        return self._has_chip(page, container_sel)
 
     # ------------------------------------------------------------------
     # Human-readable failure messages (surfaced to sync_log by callers)
@@ -561,9 +600,9 @@ class KADScraper:
                     return False
                 if not self._type_into(page, field, case_number):
                     return False
-                # Confirm the autocomplete suggestion so KAD registers the
-                # value in its model; «Найти» resets the field otherwise.
-                self._confirm_suggest(page, field)
+                # Register the value in KAD's model (confirm suggest / «+»)
+                # so «Найти» actually searches instead of resetting the field.
+                self._commit_field(page, "#sug-cases", field)
                 return True
 
             data = self._run_search(page, _fill_case)
@@ -637,9 +676,9 @@ class KADScraper:
                     return False
                 if not self._type_into(page, field, inn):
                     return False
-                # Confirm the autocomplete suggestion so KAD registers the
-                # value in its model; «Найти» resets the field otherwise.
-                self._confirm_suggest(page, field)
+                # A full INN shows NO suggest — commit via the «+» add button
+                # (handled inside _commit_field) so «Найти» actually searches.
+                self._commit_field(page, "#sug-participants", field)
                 return True
 
             data = self._run_search(page, _fill_inn)
