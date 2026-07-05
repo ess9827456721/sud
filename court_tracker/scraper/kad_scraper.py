@@ -66,14 +66,34 @@ class KADScraper:
         "--disable-dev-shm-usage",
     ]
 
-    def _start(self):
+    @staticmethod
+    def _headful_requested() -> bool:
+        """
+        Visible-window mode is on when SUD_KAD_HEADFUL=1 OR the app setting
+        `kad_headful` is '1'. DDoS-Guard's WASM fingerprint passes more
+        reliably with a real (non-headless) UI.
+        """
         import os
+        if os.environ.get("SUD_KAD_HEADFUL") == "1":
+            return True
+        try:
+            import sqlite3
+            from court_tracker.config import DB_PATH
+            conn = sqlite3.connect(str(DB_PATH))
+            try:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key='kad_headful'"
+                ).fetchone()
+            finally:
+                conn.close()
+            return bool(row) and row[0] == "1"
+        except Exception:
+            return False
+
+    def _start(self):
         from playwright.sync_api import sync_playwright
         self._playwright = sync_playwright().start()
-        # SUD_KAD_HEADFUL=1 forces a visible window — DDoS-Guard's WASM
-        # fingerprint is more likely to pass with a real (non-headless) UI.
-        headful = os.environ.get("SUD_KAD_HEADFUL") == "1"
-        headless = self._headless and not headful
+        headless = self._headless and not self._headful_requested()
         self._browser = self._playwright.chromium.launch(
             headless=headless,
             args=self._LAUNCH_ARGS,

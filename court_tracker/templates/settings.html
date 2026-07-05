@@ -54,6 +54,21 @@
           </label>
         </div>
 
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+            <input type="checkbox" name="kad_headful"
+                   {{ 'checked' if settings.kad_headful == '1' }}
+                   style="width:16px;height:16px">
+            <span>КАД: показывать окно браузера при поиске</span>
+          </label>
+          <div class="text-small text-muted mt-1">
+            Включите, если поиск по КАД не находит дела. Сайт kad.arbitr.ru
+            защищён антиботом (DDoS-Guard) — с видимым окном проверка
+            проходит надёжнее. При включении во время синхронизации будет
+            ненадолго появляться окно браузера.
+          </div>
+        </div>
+
         <div class="form-group text-muted" style="font-size:12px">
           Версия приложения: <span id="app-version-label">{{ settings.app_version }}</span>
         </div>
