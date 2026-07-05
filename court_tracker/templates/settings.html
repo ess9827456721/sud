@@ -69,6 +69,26 @@
           </div>
         </div>
 
+        <div class="form-group">
+          <label class="form-label">КАД: браузер для поиска</label>
+          <select name="kad_browser" class="form-control" style="max-width:320px">
+            <option value="auto" {{ 'selected' if settings.kad_browser == 'auto' }}>
+              Автоматически (Chrome → Edge → встроенный)</option>
+            <option value="chrome" {{ 'selected' if settings.kad_browser == 'chrome' }}>
+              Google Chrome</option>
+            <option value="msedge" {{ 'selected' if settings.kad_browser == 'msedge' }}>
+              Microsoft Edge</option>
+            <option value="chromium" {{ 'selected' if settings.kad_browser == 'chromium' }}>
+              Встроенный Chromium</option>
+          </select>
+          <div class="text-small text-muted mt-1">
+            kad.arbitr.ru защищён антиботом DDoS-Guard, который блокирует
+            встроенный Chromium. Настоящий установленный браузер (Chrome или
+            Edge) проходит проверку. Профиль браузера сохраняется между
+            запусками, поэтому проверку не нужно проходить каждый раз.
+          </div>
+        </div>
+
         <div class="form-group text-muted" style="font-size:12px">
           Версия приложения: <span id="app-version-label">{{ settings.app_version }}</span>
         </div>
