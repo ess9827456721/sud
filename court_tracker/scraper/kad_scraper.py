@@ -171,10 +171,13 @@ class KADScraper:
 
     def _chip_committed(self, page, container_sel: str, text: str) -> bool:
         """
-        KAD's filter fields (#sug-cases / #sug-participants) are tag inputs:
-        a committed value becomes a `.tag` CHIP whose text shows the value.
-        The input/textarea sits in its own empty `.tag`, so a chip carrying
-        the typed text (spaces ignored) is the reliable commit signal.
+        KAD's filter fields (#sug-cases / #sug-participants) are tag inputs.
+        A committed value becomes a CHIP rendered as `<div class="tag added">`
+        holding a DISABLED <input>/<textarea> (value in the .value property,
+        NOT in textContent) plus an `i.b-icon.remove` button. The original
+        field tag has `i.b-icon.add`. So a `.tag.added` (or any tag carrying
+        a remove button) is the reliable commit signal; when possible we also
+        confirm the chip's field value matches the typed text.
         """
         try:
             return bool(page.evaluate(
@@ -185,7 +188,16 @@ class KADScraper:
                     const cont = document.querySelector(sel);
                     if (!cont) return false;
                     for (const tag of cont.querySelectorAll('.tag')) {
-                        if (norm(tag.textContent).includes(want) && want) return true;
+                        const isChip = tag.classList.contains('added') ||
+                                       tag.querySelector('i.b-icon.remove');
+                        if (!isChip) continue;
+                        const f = tag.querySelector('input, textarea');
+                        const v = f ? norm(f.value) : '';
+                        // value property may be empty in some builds — accept
+                        // the chip itself; otherwise require a loose match
+                        if (!v || !want || v.includes(want) || want.includes(v)) {
+                            return true;
+                        }
                     }
                     return false;
                 }""", [container_sel, text]))
@@ -202,35 +214,40 @@ class KADScraper:
 
     def _commit_input(self, page, container_sel: str, field, text: str) -> bool:
         """
-        Commit the typed value into a KAD tag-input. The canonical action is
-        clicking the field's «+» add button (i.b-icon.add); Enter and a raw
-        mouse click on «+» are fallbacks. Success = a `.tag` chip with the
-        value appears in the container.
+        Commit the typed value into a KAD tag-input so KAD's own model is
+        updated (a real commit renders a `.tag.added` chip AND clears the
+        input). Order of actions, most reliable first:
+          1. Enter in the field — the human keyboard commit that updates
+             KAD's internal model;
+          2. click the field's «+» add button (i.b-icon.add);
+          3. raw mouse click on «+» at its coordinates.
+        Success = a `.tag.added` chip appears in the container.
         """
         add_sel = f"{container_sel} i.b-icon.add"
 
-        # If a suggest dropdown appeared, giving it a moment helps «+» pick
-        # up the highlighted value; it is optional, so never block on it.
+        # A suggest dropdown may open while typing — give it a brief moment
+        # (optional; never block on it).
         try:
-            page.locator("#b-suggest").wait_for(state="visible", timeout=2500)
+            page.locator("#b-suggest").wait_for(state="visible", timeout=2000)
         except Exception:
             pass
 
-        # 1. Click the «+» add button
+        # 1. Enter on the focused field (updates KAD's model)
+        try:
+            field.click()
+            field.press("Enter")
+        except Exception as exc:
+            logger.debug("KAD: Enter commit failed: %s", exc)
+        if self._wait_committed(page, container_sel, text, tries=10):
+            return True
+
+        # 2. Click the «+» add button
         try:
             plus = page.locator(add_sel).first
             if plus.count() and plus.is_visible(timeout=1500):
                 plus.click()
         except Exception as exc:
             logger.debug("KAD: «+» click failed: %s", exc)
-        if self._wait_committed(page, container_sel, text, tries=10):
-            return True
-
-        # 2. Enter on the field
-        try:
-            field.press("Enter")
-        except Exception as exc:
-            logger.debug("KAD: Enter failed: %s", exc)
         if self._wait_committed(page, container_sel, text, tries=10):
             return True
 
@@ -252,7 +269,8 @@ class KADScraper:
             return True
 
         self._debug_dump(page, "commit_failed")
-        logger.error("KAD: value was not committed into %s (no tag chip)", container_sel)
+        logger.error("KAD: value was not committed into %s (no .tag.added chip)",
+                     container_sel)
         self.last_error = (
             "КАД не принял введённое значение в поле фильтра. "
             "Скриншот и HTML сохранены в debug/."
@@ -734,38 +752,37 @@ class KADScraper:
     # ------------------------------------------------------------------
 
     def _find_case_number_input(self, page):
-        # Live DOM (verified): #sug-cases .tag > input, placeholder
-        # «например, А50-5568/08», empty id
-        for sel in ("#sug-cases input",
-                    "#sug-cases .tag input"):
+        # «Номер дела» field: editable (non-disabled) input in #sug-cases,
+        # placeholder «например, А50-5568/08». :not([disabled]) skips the
+        # disabled input inside an already-committed .tag.added chip.
+        for sel in ("#sug-cases input:not([disabled])",
+                    "input[placeholder*='5568']:not([disabled])"):
             try:
                 el = page.locator(sel).first
                 if el.count() and el.is_visible(timeout=2000):
                     return el
             except Exception:
                 pass
-        try:
-            el = page.get_by_placeholder(re.compile("А50-5568")).first
-            if el.is_visible(timeout=2000):
-                return el
-        except Exception:
-            pass
         return None
 
     def _find_inn_input(self, page):
-        # Live DOM (verified): #sug-participants .tag > textarea,
-        # placeholder «название, ИНН или ОГРН»
-        for sel in ("#sug-participants textarea",
-                    "#sug-participants .tag textarea"):
+        # Top «Участник дела» field — «название, ИНН или ОГРН». The client
+        # INN search MUST land here (not in «Номер дела»/«Судья»). It is the
+        # editable (non-disabled) TEXTAREA in #sug-participants; the disabled
+        # textarea inside a committed chip is excluded via :not([disabled]).
+        for sel in ("#sug-participants textarea:not([disabled])",
+                    "textarea[placeholder*='ОГРН']:not([disabled])",
+                    "textarea[placeholder*='ИНН']:not([disabled])"):
             try:
                 el = page.locator(sel).first
                 if el.count() and el.is_visible(timeout=2000):
                     return el
             except Exception:
                 pass
+        # Placeholder anchor as a last resort
         try:
-            el = page.get_by_placeholder("название, ИНН или ОГРН").first
-            if el.is_visible(timeout=2000):
+            el = page.get_by_placeholder(re.compile("ИНН|ОГРН")).first
+            if el.count() and el.is_visible(timeout=2000):
                 return el
         except Exception:
             pass
