@@ -41,10 +41,43 @@ class KADScraper:
     def __exit__(self, *_):
         self._stop()
 
+    # kad.arbitr.ru sits behind DDoS-Guard, which runs a WASM fingerprint
+    # (window.chrome / navigator.plugins / webdriver / canvas / WebGL). A
+    # plain automated Chromium fails it and its own JS then refuses to send
+    # /Kad/SearchInstances. These anti-detection measures make the browser
+    # look like an ordinary one so the fingerprint passes.
+    _STEALTH_JS = """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        window.chrome = window.chrome || { runtime: {}, app: {}, csi: function(){},
+            loadTimes: function(){} };
+        Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','en-US','en']});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+        const _q = navigator.permissions && navigator.permissions.query;
+        if (_q) navigator.permissions.query = (p) => (
+            p && p.name === 'notifications'
+              ? Promise.resolve({state: Notification.permission})
+              : _q(p));
+    """
+
+    _LAUNCH_ARGS = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+
     def _start(self):
+        import os
         from playwright.sync_api import sync_playwright
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=self._headless)
+        # SUD_KAD_HEADFUL=1 forces a visible window — DDoS-Guard's WASM
+        # fingerprint is more likely to pass with a real (non-headless) UI.
+        headful = os.environ.get("SUD_KAD_HEADFUL") == "1"
+        headless = self._headless and not headful
+        self._browser = self._playwright.chromium.launch(
+            headless=headless,
+            args=self._LAUNCH_ARGS,
+        )
 
     def _stop(self):
         if self._browser:
@@ -56,7 +89,13 @@ class KADScraper:
         context = self._browser.new_context(
             user_agent=USER_AGENT,
             viewport=VIEWPORT,
+            locale="ru-RU",
+            timezone_id="Europe/Moscow",
         )
+        try:
+            context.add_init_script(self._STEALTH_JS)
+        except Exception:
+            pass
         page = context.new_page()
         page.set_default_timeout(TIMEOUT)
         return page
@@ -187,7 +226,10 @@ class KADScraper:
             try:
                 btn = page.locator(sel).first
                 if btn.count() and btn.is_visible(timeout=1500):
-                    btn.click()
+                    try:
+                        btn.click()
+                    except Exception:
+                        btn.click(force=True)
                     return
             except Exception as exc:
                 last_exc = exc
