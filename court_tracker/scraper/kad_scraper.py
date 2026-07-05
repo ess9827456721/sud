@@ -131,55 +131,15 @@ class KADScraper:
             pass
         return True
 
-    def _has_chip(self, page, container_sel: str) -> bool:
-        """A committed value shows as `<div class="tag added">` (with an
-        i.b-icon.remove), distinct from the editable field's tag (i.b-icon.add)."""
-        try:
-            return bool(page.evaluate(
-                """(sel) => {
-                    const c = document.querySelector(sel);
-                    if (!c) return false;
-                    for (const t of c.querySelectorAll('.tag'))
-                        if (t.classList.contains('added') ||
-                            t.querySelector('i.b-icon.remove')) return true;
-                    return false;
-                }""", container_sel))
-        except Exception:
-            return False
-
-    def _click_add(self, page, container_sel: str) -> None:
-        """Click the field's «+» add button (tiny <i> icon) robustly."""
-        sel = f"{container_sel} i.b-icon.add"
-        try:
-            plus = page.locator(sel).first
-            if not plus.count():
-                return
-            try:
-                plus.click(force=True, timeout=2000)
-                return
-            except Exception:
-                pass
-            try:
-                plus.dispatch_event("click")
-            except Exception:
-                plus.evaluate("el => el.click()")
-        except Exception as exc:
-            logger.debug("KAD: «+» add-click failed: %s", exc)
-
-    def _commit_field(self, page, container_sel: str, field) -> bool:
+    def _trigger_search(self, page) -> str:
         """
-        Register the typed value in KAD's model. The gesture depends on
-        whether an autocomplete suggest appears:
-          - CASE NUMBER: a suggest with the match appears → confirm it
-            (click the highlighted row / Enter);
-          - FULL INN in «Участник дела»: NO suggest appears → commit via the
-            field's «+» add button (the participant field is a <textarea>,
-            where Enter would only insert a newline).
-        A committed value becomes a `.tag.added` chip — the success signal.
-        We try suggest-confirm, then «+», then Enter, stopping at the chip;
-        if none appears we still return (the «Найти» XHR is the final judge).
+        Start the search the way a human does:
+          - if the autocomplete suggest is showing, CLICK its item — in KAD
+            that runs the search immediately (no «Найти» needed);
+          - otherwise (e.g. a full INN shows no suggest) click «Найти».
+        The «+»/«−» icons are NOT used — they only add a second search row.
+        Returns 'suggest' or 'submit' for logging.
         """
-        # 1. Autocomplete suggest, if it shows up quickly
         try:
             page.locator("#b-suggest").wait_for(state="visible", timeout=3500)
             for sel in ("#b-suggest .body__i li.active a",
@@ -189,27 +149,11 @@ class KADScraper:
                 item = page.locator(sel).first
                 if item.count() and item.is_visible(timeout=800):
                     item.click()
-                    page.wait_for_timeout(400)
-                    break
+                    return "suggest"
         except Exception:
             pass
-        if self._has_chip(page, container_sel):
-            return True
-
-        # 2. No suggest (full INN) → the «+» add button commits the value
-        self._click_add(page, container_sel)
-        page.wait_for_timeout(400)
-        if self._has_chip(page, container_sel):
-            return True
-
-        # 3. Keyboard fallback (works for the case <input>)
-        try:
-            field.click()
-            field.press("Enter")
-            page.wait_for_timeout(300)
-        except Exception:
-            pass
-        return self._has_chip(page, container_sel)
+        self._click_submit(page)
+        return "submit"
 
     # ------------------------------------------------------------------
     # Human-readable failure messages (surfaced to sync_log by callers)
@@ -250,32 +194,25 @@ class KADScraper:
         raise RuntimeError(f"submit click failed: {last_exc or 'button not found'}")
 
     def _run_search(self, page, fill_fn) -> Optional[dict]:
-        """Type via fill_fn, click «Найти», return the intercepted JSON."""
+        """
+        Drive the search like a human: fill_fn TYPES the value into the field
+        with real keyboard events (which — unlike fill() — register in KAD's
+        Backbone model), then _trigger_search either CLICKS the autocomplete
+        suggestion (that runs the search directly in KAD) or, when no suggest
+        appears (a full INN), clicks «Найти». Returns the intercepted
+        SearchInstances JSON.
+        """
         self._dismiss_overlays(page)
         if not fill_fn():
             return None
         self._dismiss_overlays(page)
-        class _ClickFailed(Exception):
-            pass
 
         try:
-            try:
-                with page.expect_response(
-                        lambda r: "SearchInstances" in r.url,
-                        timeout=30_000) as resp_info:
-                    try:
-                        self._click_submit(page)
-                    except Exception as exc:
-                        raise _ClickFailed(str(exc)) from exc
-                resp = resp_info.value
-            except _ClickFailed as exc:
-                # Distinguish a click failure from a missing XHR
-                self._debug_dump(page, "click_failed")
-                self.last_error = (
-                    f"КАД: не удалось нажать кнопку «Найти» ({str(exc)[:150]}). "
-                    "Скриншот и HTML сохранены в debug/."
-                )
-                return None
+            with page.expect_response(
+                    lambda r: "SearchInstances" in r.url,
+                    timeout=30_000) as resp_info:
+                self._trigger_search(page)
+            resp = resp_info.value
 
             if resp.status == 451:
                 logger.warning("KAD rate-limited (451) on native request; retry in 45s")
@@ -283,7 +220,7 @@ class KADScraper:
                 with page.expect_response(
                         lambda r: "SearchInstances" in r.url,
                         timeout=30_000) as resp_info2:
-                    self._click_submit(page)
+                    self._trigger_search(page)
                 resp = resp_info2.value
 
             if resp.status != 200:
@@ -598,12 +535,10 @@ class KADScraper:
                     logger.error("KAD UI: case number input not found")
                     self._debug_dump(page, "no_case_input")
                     return False
-                if not self._type_into(page, field, case_number):
-                    return False
-                # Register the value in KAD's model (confirm suggest / «+»)
-                # so «Найти» actually searches instead of resetting the field.
-                self._commit_field(page, "#sug-cases", field)
-                return True
+                # Typing with real keyboard events registers the value; the
+                # search is then triggered by clicking the suggestion (or
+                # «Найти») in _trigger_search.
+                return self._type_into(page, field, case_number)
 
             data = self._run_search(page, _fill_case)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
@@ -674,12 +609,9 @@ class KADScraper:
                     logger.error("KAD UI: participant/INN input not found")
                     self._debug_dump(page, "no_inn_input")
                     return False
-                if not self._type_into(page, field, inn):
-                    return False
-                # A full INN shows NO suggest — commit via the «+» add button
-                # (handled inside _commit_field) so «Найти» actually searches.
-                self._commit_field(page, "#sug-participants", field)
-                return True
+                # A full INN shows no suggest, so _trigger_search will click
+                # «Найти»; a partial match with a suggest is clicked instead.
+                return self._type_into(page, field, inn)
 
             data = self._run_search(page, _fill_inn)
             cases = [c for c in (self._item_to_case(i) for i in self._api_items(data)) if c]
